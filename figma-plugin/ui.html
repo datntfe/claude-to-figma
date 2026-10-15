@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 14px; font: 12px/1.45 Inter, system-ui, -apple-system, sans-serif;
+         background: var(--figma-color-bg, #fff); color: var(--figma-color-text, #222); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #d97706; flex: none; }
+  .dot.on { background: #16a34a; }
+  .dot.off { background: #dc2626; }
+  h1 { font-size: 13px; margin: 0; font-weight: 600; }
+  #status { margin: 6px 0 10px; color: var(--figma-color-text-secondary, #666); }
+  #log { height: 92px; overflow: auto; border-radius: 6px; padding: 6px 8px; font: 11px/1.5 ui-monospace, Menlo, monospace;
+         background: var(--figma-color-bg-secondary, #f5f5f5); color: var(--figma-color-text-secondary, #555); }
+  .foot { margin-top: 8px; justify-content: space-between; color: var(--figma-color-text-tertiary, #999); }
+  input { width: 52px; font: inherit; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc);
+          background: transparent; color: inherit; }
+  button { font: inherit; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc);
+           background: transparent; color: inherit; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="row"><div id="dot" class="dot"></div><h1>Claude Bridge</h1></div>
+  <div id="status">Connecting to the bridge on this computer…</div>
+  <div id="log"></div>
+  <div class="row foot">
+    <span>Port <input id="port" value="3055"></span>
+    <button id="reconnect">Reconnect</button>
+  </div>
+<script>
+  var ws = null, retry = null, count = 0;
+  var dot = document.getElementById("dot"), statusEl = document.getElementById("status"), logEl = document.getElementById("log");
+  function setStatus(state, text) { dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : ""); statusEl.textContent = text; }
+  function addLog(t) {
+    var line = document.createElement("div");
+    line.textContent = new Date().toLocaleTimeString() + "  " + t;
+    logEl.appendChild(line);
+    while (logEl.childNodes.length > 60) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function port() { return parseInt(document.getElementById("port").value, 10) || 3055; }
+  function schedule() { clearTimeout(retry); retry = setTimeout(connect, 2000); }
+  function connect() {
+    clearTimeout(retry);
+    try { if (ws) { ws.onclose = null; ws.close(); } } catch (e) {}
+    try { ws = new WebSocket("ws://localhost:" + port()); }
+    catch (e) { setStatus("off", "Can't open a connection: " + e.message); schedule(); return; }
+    ws.onopen = function () {
+      setStatus("on", "Connected. Claude can now work in this file. Keep this window open.");
+      addLog("connected");
+      parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
+    };
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (!msg || !msg.command) return;
+      count++;
+      addLog("#" + count + " " + msg.command);
+      parent.postMessage({ pluginMessage: { type: "command", id: msg.id, command: msg.command, params: msg.params } }, "*");
+    };
+    ws.onclose = function () {
+      setStatus("off", "Not connected. Make sure Claude is open (it starts the bridge), then wait or press Reconnect.");
+      schedule();
+    };
+    ws.onerror = function () { /* onclose follows */ };
+  }
+  window.onmessage = function (ev) {
+    var m = ev.data && ev.data.pluginMessage;
+    if (!m || (m.type !== "result" && m.type !== "hello")) return;
+    if (m.type === "result" && !m.ok) addLog("  error: " + String(m.error).slice(0, 120));
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(m));
+  };
+  document.getElementById("reconnect").onclick = function () { addLog("reconnecting…"); connect(); };
+  connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "Claude Bridge",
+  "id": "1428830115562009031",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:3055", "ws://localhost:3055"],
+    "reasoning": "Connects only to the Claude bridge server running on this computer."
+  }
+}
