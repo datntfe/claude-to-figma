@@ -27,7 +27,7 @@ const os = require("os");
 const pathMod = require("path");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const log = (...a) => process.stderr.write("[figma-bridge] " + a.join(" ") + "\n");
 
 /* ---------------- WebSocket framing (RFC 6455, minimal) ---------------- */
@@ -421,7 +421,7 @@ const RUN_CODE_HELP = [
   "The code is the BODY of an async function with these variables in scope:",
   "  figma — the Figma Plugin API object (documentAccess is dynamic-page: use await figma.getNodeByIdAsync(id), await figma.setCurrentPageAsync(page), await page.loadAsync(), and the *Async variants such as figma.variables.getLocalVariablesAsync(), node.getMainComponentAsync(), node.setFillStyleIdAsync()).",
   "  log(...args) — collect debug output (returned as logs).",
-  "  h — helpers: h.solid('#RRGGBB', opacity?) → paints, h.hex('#RRGGBB') → {r,g,b}, h.color('#RRGGBBAA') → {r,g,b,a}, h.toHex(color) → '#RRGGBB', await h.font(family, style) → loads and returns a FontName, h.svg(svgString, width?) → node, h.summary(node, depth?), await h.describe(node) → full details (fills, styles, bound variables, component), await h.variable('color/brand/primary', collection?) → a Variable (local, or imported from an enabled library), await h.bind(node, 'fill', 'color/brand/primary') → binds a variable to a field.",
+  "  h — helpers: h.solid('#RRGGBB', opacity?) → paints, h.hex('#RRGGBB') → {r,g,b}, h.color('#RRGGBBAA') → {r,g,b,a}, h.toHex(color) → '#RRGGBB', await h.font(family, style) → loads and returns a FontName, h.svg(svgString, width?) → node, h.summary(node, depth?), await h.describe(node) → full details (fills, styles, bound variables, component), await h.variable('color/brand/primary', collection?) → a Variable (local, or imported from an enabled library), await h.bind(node, 'fill', 'color/brand/primary') → binds a variable to a field, await h.shader(node, {name, properties}) → applies a shader (see update_nodes).",
   "Use `return value` to send data back; nodes are returned as {id,name,type,...} summaries.",
   "Load fonts before setting text: await figma.loadFontAsync({family:'Inter', style:'Regular'}).",
   "globalThis persists while the plugin stays open, so you can store a helper library once (globalThis.lib = {...}) and reuse it in later calls.",
@@ -453,6 +453,7 @@ const TOOLS = [
       if (st.files && st.files.length > 1) res.files = st.files;
       const notes = [];
       if (!info.version || older(info.version, VERSION)) notes.push("The Claude Bridge plugin in Figma is older than this bridge (" + VERSION + "): close it in Figma and run it again (Plugins → Development → Claude Bridge).");
+      else if (older(VERSION, info.version)) notes.push("The Claude Bridge plugin (" + info.version + ") is newer than this bridge (" + VERSION + "): quit Claude completely (Cmd+Q) and open it again so the new tools load.");
       if (older(hubV, VERSION)) notes.push("Another Claude window started an older bridge (" + hubV + ") that still owns port " + PORT + ". Quit Claude completely (Cmd+Q) and open it again to finish updating; until then working with several files at once is off.");
       if (notes.length) res.notes = notes;
       return text(JSON.stringify(res, null, 2));
@@ -561,7 +562,7 @@ const TOOLS = [
       "  layout?: { mode: 'HORIZONTAL'|'VERTICAL', gap?, padding?: number|[t,r,b,l]|'{variable}', align?: 'MIN'|'CENTER'|'MAX', justify?: 'MIN'|'CENTER'|'MAX'|'SPACE_BETWEEN', wrap?, w?: 'HUG'|'FILL'|number, h?: 'HUG'|'FILL'|number },",
       "  text?: string, font?: {family, style}, fontSize?, lineHeight?, letterSpacing?, textAlign?, color?: '#RRGGBB' | '{variable}', svg?: string (for SVG),",
       "  component?: local component (set) name or id, or 'key:<library key>' (makes an INSTANCE), variant?: 'Size=L, State=Hover', properties?: {Label: 'Play'},",
-      "  textStyle?, fillStyle?, strokeStyle?, effectStyle?: style name (or 'key:<library key>'), effects?: [{type:'DROP_SHADOW', color, x, y, blur, spread}],",
+      "  textStyle?, fillStyle?, strokeStyle?, effectStyle?: style name (or 'key:<library key>'), effects?: [{type:'DROP_SHADOW', color, x, y, blur, spread}], shader?: same as in update_nodes,",
       "  variables?: {field: '{variable}'}, modes?: {Collection: 'Dark'}, link?: '<name of another layer in this build>' | {to, transition?, duration? (ms)},",
       "  opacity?, visible?, fillWidth?: true, props?: { any other Figma node property }, children?: [ ...specs ] }",
       "'{name}' values bind variables (local, or from enabled libraries). Returns the created node ids."
@@ -617,6 +618,7 @@ const TOOLS = [
       "variables: {field: '{variable}'} and any value written as '{variable}' is bound to that variable, modes: {Collection: 'Dark' | null},",
       "variant: 'Size=L' and properties: {Label: 'Play'} for instances, swap: component name or 'key:…',",
       "link: {to: layer id | 'back' | 'close' | 'https://…', trigger?: 'ON_CLICK'|'ON_HOVER'|'ON_PRESS'|'ON_DRAG', transition?: 'SMART_ANIMATE'|'DISSOLVE'|'MOVE_IN'|'PUSH'|'SLIDE_IN'|'none', duration?: ms, overlay?: true} (prototype), or link: null to remove,",
+      "shader: 'Name' | {name, properties?: {Name: value ('#RRGGBB', number, true, [x, y], ['#000', '#FFF'] for a gradient, or '{variable}')}, target?: 'fill'|'stroke' (fill shaders; effect shaders go on effects), replace?: true, remove?: true, opacity?} (imported on first use; applying it again updates its properties; the result lists its properties), shader: null removes every shader,",
       "props: {any other Figma property}, remove: true.",
       "Errors are reported per layer; the others still change. save_version: a title to save a restore point first."
     ].join("\n"),
@@ -778,7 +780,7 @@ const TOOLS = [
     name: "get_library",
     description: [
       "The design-system assets available in the open file: local paint/text/effect/grid styles with their values, local components and component sets (key, variants, properties), variable collections (local and from enabled libraries),",
-      "the shaders available to the file, and with used_remote=true the library components used on the current page (name, key, number of uses).",
+      "the shaders available to the file (in the file, from libraries and the user's own; with their properties once imported; apply them with update_nodes or build: shader), and with used_remote=true the library components used on the current page (name, key, number of uses).",
       "Local items can be edited here (set_styles, set_variables, run_code). Library items are read-only here; their keys work with import_from_library."
     ].join(" "),
     inputSchema: {
@@ -967,6 +969,7 @@ const INSTRUCTIONS = [
   "To find out what the user means by \"this\" or \"here\", call get_context (selection, the area on their screen, recent activity), get_selection for full details, and screenshot with no arguments to see it.",
   "Tidy and polish: audit_design (with fix for the safe fixes) and update_nodes for batch changes. Text: find_nodes, then update_nodes.",
   "Variables: get_variables, set_variables, bind_variables. Styles and components: get_library, set_styles, import_from_library. New designs: build with components, '{variable}' values and styles.",
+  "Shaders: get_library kind 'shaders' lists them, update_nodes or build with shader applies them as a fill, stroke or effect. The Plugin API can't write new shaders.",
   "Files on this computer: place_image brings images in, export_nodes writes assets out.",
   "Library items (variables, styles, components from another file) are read-only in the files that use them: to change them, ask the user to open the library file and run Claude Bridge there, make the change in that file, then the user publishes the library update.",
   "Prefer run_code for anything the other tools don't cover, then screenshot to check the result.",

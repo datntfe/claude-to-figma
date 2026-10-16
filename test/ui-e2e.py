@@ -52,10 +52,10 @@ SIM = """
 window.__file = %s;
 window.addEventListener('message', function (ev) {
   var m = ev.data && ev.data.pluginMessage; if (!m) return;
-  if (m.type === 'ui-ready') window.postMessage({ pluginMessage: { type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.2.0', session: window.__file } } }, '*');
+  if (m.type === 'ui-ready') window.postMessage({ pluginMessage: { type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.3.0', session: window.__file } } }, '*');
   if (m.type === 'command') {
     var result = m.command === 'run_code' ? { value: 'ran ' + m.params.code.length + ' chars in ' + window.__file, logs: [] }
-      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.2.0' }
+      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.3.0' }
       : { echo: m.command, file: window.__file };
     setTimeout(function () { window.postMessage({ pluginMessage: { type: 'result', id: m.id, ok: true, result: result } }, '*'); }, 10);
   }

@@ -52,7 +52,7 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   await sleep(400);
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
   assert.equal(init.result.protocolVersion, "2025-06-18");
-  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.2.0");
+  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.3.0");
   assert.ok(init.result.capabilities.prompts && /get_context/.test(init.result.instructions));
   srv.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
@@ -100,7 +100,7 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
 
   /* one file */
   const big = Buffer.alloc(3 * 1024 * 1024, 7).toString("base64"); // ~4 MB string
-  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.2.0", session: "sA" };
+  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.3.0", session: "sA" };
   const handlerA = (m) => {
     if (m.command === "ping") return ping(infoA);
     if (m.command === "run_code") return m.params.code.includes("throw") ? new Error("boom") : { value: { len: m.params.code.length, by: "A" }, logs: ["hi"] };
@@ -114,7 +114,7 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   r = await tool("status");
   const st = JSON.parse(txt(r));
   console.log("status:", txt(r).replace(/\s+/g, " "));
-  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.2.0"); assert.ok(!st.notes && !st.files);
+  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.3.0"); assert.ok(!st.notes && !st.files);
 
   const longCode = "// " + "x".repeat(300000) + "\nreturn 1";   // > 64 KB → 64-bit frame length, server→client
   r = await tool("run_code", { code: longCode });
@@ -168,7 +168,7 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   console.log("export_nodes OK →", ex.folder);
 
   /* a second file: the library */
-  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.2.0", session: "sB" };
+  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.3.0", session: "sB" };
   let holdB = false;
   const B = fakePlugin(infoB, (m) => {
     if (m.command === "ping") return ping(infoB);
@@ -233,11 +233,17 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   assert.ok(!r.isError);
   r = await tool("status");
   assert.ok(/older than this bridge/.test(txt(r)), "a plugin without a version is reported as old");
-  console.log("reconnect over 127.0.0.1 + old plugin note OK");
+  C.close();
+  await sleep(100);
+  const D = fakePlugin({ file: "Fourth", page: "P", editorType: "figma", version: "9.0.0", session: "sD" }, (m) => ({ ok: 1, cmd: m.command }));
+  await D.ready;
+  r = await tool("status");
+  assert.ok(/newer than this bridge/.test(txt(r)) && /Cmd\+Q/.test(txt(r)), "a newer plugin asks for a Claude restart");
+  D.close();
+  console.log("reconnect over 127.0.0.1 + old/new plugin notes OK");
 
   const unknown = await rpc("foo/bar", {});
   assert.equal(unknown.error.code, -32601);
-  C.close();
   srv.stdin.end();
   await sleep(200);
   console.log("server stderr:\n" + stderr.trim());

@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 
@@ -136,7 +136,8 @@ const H = {
   bind: async function (node, field, ref, opts) { return bindOne(node, field, ref === null ? null : await resolveVariable(ref, opts && opts.collection), opts || {}); },
   update: function (node, props) { return applyProps(node, props || {}, makeCtx()); },
   link: function (node, to, opts) { return setLink(node, Object.assign({ to: typeof to === "string" ? to : to.id }, opts || {})); },
-  component: function (ref, variant) { return resolveComponent(ref, variant); }
+  component: function (ref, variant) { return resolveComponent(ref, variant); },
+  shader: function (node, spec) { return applyShader(node, spec, makeCtx()); }
 };
 
 async function getNode(id) {
@@ -148,7 +149,17 @@ async function getNode(id) {
 /* ---------- lookups shared within one command (cached) ---------- */
 function makeCtx() {
   const vars = new Map(), cols = new Map(), styles = new Map(), mains = new Map();
+  let shaderList = null;
   const ctx = {
+    shaders: async function () {
+      if (!shaderList) { try { shaderList = typeof figma.listAvailableShaders === "function" ? (await figma.listAvailableShaders()).slice() : []; } catch (e) { shaderList = []; } }
+      return shaderList;
+    },
+    shaderSeen: function (s) {   // keep the list in step after an import
+      if (!shaderList) shaderList = [];
+      const i = shaderList.findIndex(function (x) { return x.id === s.id; });
+      if (i >= 0) shaderList[i] = s; else shaderList.push(s);
+    },
     main: async function (inst) {
       if (!mains.has(inst.id)) { let m = null; try { m = await inst.getMainComponentAsync(); } catch (e) { m = null; } mains.set(inst.id, m); }
       return mains.get(inst.id);
@@ -179,6 +190,7 @@ function makeCtx() {
 
 /* ---------- describing layers ---------- */
 async function paintText(p, ctx) {
+  if (p.type === "SHADER") return shaderText(p, ctx);
   let s;
   if (p.type === "SOLID") s = toHex(p.color, p.opacity);
   else if (p.type.indexOf("GRADIENT_") === 0) s = lower(p.type.slice(9)) + " gradient " + (p.gradientStops || []).map(function (st) { return toHex(st.color); }).join(" → ");
@@ -199,6 +211,7 @@ function effectText(e) {
   if (e.visible === false) s += " (hidden)";
   return s;
 }
+function effectsText(list, ctx) { return Promise.all((list || []).map(function (e) { return e.type === "SHADER" ? shaderText(e, ctx) : effectText(e); })); }
 function lhText(lh) { if (!lh || lh === figma.mixed) return "mixed"; if (lh.unit === "AUTO") return "auto"; return round(lh.value) + (lh.unit === "PERCENT" ? "%" : ""); }
 function lsText(ls) { if (!ls || ls === figma.mixed) return "mixed"; return round(ls.value) + (ls.unit === "PERCENT" ? "%" : "px"); }
 function defsText(defs) {
@@ -293,7 +306,7 @@ async function describe(node, ctx, depth) {
     if (node.cornerRadius === figma.mixed) o.radius = [node.topLeftRadius, node.topRightRadius, node.bottomRightRadius, node.bottomLeftRadius].map(round);
     else if (node.cornerRadius) o.radius = round(node.cornerRadius);
   }
-  if ("effects" in node && node.effects && node.effects.length) o.effects = node.effects.map(effectText);
+  if ("effects" in node && node.effects && node.effects.length) o.effects = await effectsText(node.effects, ctx);
   if ("layoutMode" in node && node.layoutMode && node.layoutMode !== "NONE") {
     const al = { direction: node.layoutMode };
     if (node.layoutMode !== "GRID") {
@@ -943,7 +956,7 @@ async function styleOut(s, ctx) {
     const bv = s.boundVariables || {};
     const ks = Object.keys(bv);
     if (ks.length) { o.variables = {}; for (let i = 0; i < ks.length; i++) if (bv[ks[i]] && bv[ks[i]].id) o.variables[ks[i]] = await ctx.varLabel(bv[ks[i]].id); }
-  } else if (s.type === "EFFECT") o.value = s.effects.map(effectText).join(", ");
+  } else if (s.type === "EFFECT") o.value = (await effectsText(s.effects, ctx)).join(", ");
   else if (s.type === "GRID") o.value = s.layoutGrids.map(function (g) { return lower(g.pattern) + (g.count ? " ×" + g.count : "") + (g.sectionSize ? " " + g.sectionSize : "") + (g.gutterSize ? " gutter " + g.gutterSize : ""); }).join(", ");
   if (s.description) o.description = clip(s.description, 160);
   return o;
@@ -985,6 +998,178 @@ function paintsFrom(list) {
     if (typeof p === "string") { const parts = p.split("@"); const c = parseColor(parts[0]); return { type: "SOLID", color: { r: c.r, g: c.g, b: c.b }, opacity: parts[1] !== undefined ? parseFloat(parts[1]) : c.a }; }
     return p;
   });
+}
+
+/* ---------- shaders: listed by get_library, imported on first use, applied as a fill, stroke or effect ----------
+   Figma's Plugin API can list, import and apply shaders, not write new ones. Properties are addressed by
+   their names here; Figma keys them by property-definition id. */
+const SHADER_SHAPES = { POINT: ["x", "y"], LINE: ["x", "y", "x2", "y2"], CIRCLE: ["x", "y", "radius"], CIRCLE_POINT: ["x", "y", "radius", "angle"] };
+const SHADER_TARGETS = { fill: "fills", fills: "fills", stroke: "strokes", strokes: "strokes", effect: "effects", effects: "effects" };
+function squash(s) { return lower(s).replace(/[\s_\-]+/g, ""); }
+function shaderValText(v) {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === "number") return String(round(v));
+  if (typeof v !== "object") return JSON.stringify(v);
+  if (v.type === "VARIABLE_ALIAS") return "{variable}";
+  if ("r" in v) return toHex(v);
+  if (Array.isArray(v.stops)) return v.stops.map(function (s) { return shaderValText(s.color); }).join(" → ");
+  if ("color" in v) return "(" + round(v.x) + ", " + round(v.y) + ") " + shaderValText(v.color);
+  return "(" + Object.keys(v).map(function (k) { return typeof v[k] === "number" ? round(v[k]) : v[k]; }).join(", ") + ")";
+}
+/* { "Grain size": "number (default 2)", … }, keyed by property name */
+function shaderDefs(defs) {
+  const out = {};
+  Object.keys(defs || {}).forEach(function (id) {
+    const d = defs[id];
+    let s = lower(d.type).replace(/_/g, " ");
+    if (d.defaultValue !== undefined) s += " (default " + shaderValText(d.defaultValue) + ")";
+    if (d.description) s += " · " + clip(d.description, 80);
+    out[out[d.name] === undefined ? d.name : d.name + " #" + id] = s;
+  });
+  return out;
+}
+async function shaderText(x, ctx) {
+  const list = ctx && ctx.shaders ? await ctx.shaders() : [];
+  const s = list.filter(function (q) { return q.id === x.id; })[0];
+  const meta = x.propertyMetadata || (s && s.propertyDefinitions) || {};
+  const props = x.properties || {};
+  const ks = Object.keys(props), parts = [];
+  for (let i = 0; i < ks.length && i < 12; i++) {
+    const v = props[ks[i]];
+    parts.push((meta[ks[i]] ? meta[ks[i]].name : ks[i]) + " " + (v && v.type === "VARIABLE_ALIAS" && ctx ? "← " + await ctx.varLabel(v.id) : shaderValText(v)));
+  }
+  let t = "shader " + (s ? s.name : x.id) + (parts.length ? " (" + parts.join(", ") + (ks.length > 12 ? ", …" : "") + ")" : "");
+  if (x.opacity !== undefined && x.opacity < 1) t += " " + Math.round(x.opacity * 100) + "%";
+  if (x.visible === false) t += " (hidden)";
+  return t;
+}
+async function findShader(o, ctx) {
+  if (typeof figma.listAvailableShaders !== "function") throw new Error("This version of Figma has no shader API: update Figma to use shaders");
+  const want = String(o.id || o.name || o.shader || "").trim();
+  if (!want) throw new Error("shader needs a name (get_library kind: 'shaders' lists them)");
+  const list = await ctx.shaders();
+  const w = squash(want);
+  let hit = list.filter(function (s) { return s.id === want; })[0] || list.filter(function (s) { return squash(s.name) === w; })[0];
+  if (!hit) {
+    const part = list.filter(function (s) { return squash(s.name).indexOf(w) >= 0; });
+    if (part.length > 1) throw new Error('Several shaders match "' + want + '": ' + part.map(function (s) { return s.name; }).join(", "));
+    hit = part[0];
+  }
+  if (!hit) throw new Error('No shader "' + want + '" is available to this file. ' + (list.length ? "Available: " + list.slice(0, 20).map(function (s) { return s.name; }).join(", ") : "There are none yet: add one in Figma first (the Plugin API can apply shaders, not write new ones)."));
+  if (!hit.imported || !hit.propertyDefinitions) { hit = await figma.importShaderById(hit.id); ctx.shaderSeen(hit); }
+  return hit;
+}
+async function shaderColor(v, idx) {
+  if (isVarRef(v)) return figma.variables.createVariableAlias(await resolveVariable(varRefOf(v), null, idx));
+  if (typeof v === "string" && v.indexOf("@") > 0) { const parts = v.split("@"); const c = parseColor(parts[0]); c.a = c.a * parseFloat(parts[1]); return c; }
+  return parseColor(v);
+}
+async function shaderValue(def, v, idx, name) {
+  if (isVarRef(v)) return figma.variables.createVariableAlias(await resolveVariable(varRefOf(v), null, idx));
+  const t = def.type;
+  if (t === "NUMBER") { const x = typeof v === "string" ? parseFloat(v) : +v; if (!isFinite(x)) throw new Error(name + " needs a number"); return x; }
+  if (t === "BOOLEAN") return v === true || v === 1 || ["true", "on", "yes", "1"].indexOf(lower(v)) >= 0;
+  if (t === "TEXT") return String(v);
+  if (t === "COLOR") return shaderColor(v, idx);
+  if (SHADER_SHAPES[t]) {
+    const keys = SHADER_SHAPES[t], o = {};
+    keys.forEach(function (k, i) { const x = Array.isArray(v) ? v[i] : (v || {})[k]; if (x === undefined || x === null || !isFinite(+x)) throw new Error(name + " needs " + keys.join(", ")); o[k] = +x; });
+    return o;
+  }
+  if (t === "COLOR_POINT") {
+    const a = Array.isArray(v) ? { x: v[0], y: v[1], color: v[2] } : (v || {});
+    if (!isFinite(+a.x) || !isFinite(+a.y) || a.color === undefined) throw new Error(name + " needs x, y and color");
+    return { x: +a.x, y: +a.y, color: await shaderColor(a.color, idx) };
+  }
+  if (t === "GRADIENT") {
+    const stops = Array.isArray(v) ? v : ((v && v.stops) || []);
+    if (stops.length < 2) throw new Error(name + " needs at least 2 colour stops");
+    const out = [];
+    for (let i = 0; i < stops.length; i++) {
+      const s = stops[i], obj = s && typeof s === "object" && !isVarRef(s) && "color" in s;
+      out.push({ position: obj && s.position !== undefined ? +s.position : i / (stops.length - 1), color: await shaderColor(obj ? s.color : s, idx) });
+    }
+    return { stops: out };
+  }
+  return v;   // IMAGE, INSTANCE_SWAP, SLOT: passed on as given
+}
+async function shaderProps(sh, given, idx) {
+  const defs = sh.propertyDefinitions || {}, ids = Object.keys(defs);
+  const out = {}, names = [], keys = Object.keys(given || {});
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const id = defs[k] ? k : ids.filter(function (d) { return squash(defs[d].name) === squash(k); })[0];
+    if (!id) throw new Error('Shader "' + sh.name + '" has no property "' + k + '"' + (ids.length ? ". Its properties: " + ids.map(function (d) { return defs[d].name + " (" + lower(defs[d].type).replace(/_/g, " ") + ")"; }).join(", ") : " (it has none)"));
+    out[id] = await shaderValue(defs[id], given[k], idx, defs[id].name);
+    names.push(defs[id].name);
+  }
+  return { props: out, names: names };
+}
+/* Reads of applied shaders carry propertyMetadata; it isn't written back. */
+function cleanFx(x) {
+  if (!x || x.type !== "SHADER" || !("propertyMetadata" in x)) return x;
+  const o = Object.assign({}, x);
+  delete o.propertyMetadata;
+  return o;
+}
+/* spec: 'Name' | {name | id, properties?: {Name: value}, target?: 'fill'|'stroke'|'effect', replace?, remove?, visible?, opacity?, blendMode?}
+   | an array of those | null (remove every shader from the layer). Applying a shader the layer already has updates it. */
+async function applyShader(n, spec, ctx, idx) {
+  if (Array.isArray(spec)) { const done = []; for (let i = 0; i < spec.length; i++) done.push(await applyShader(n, spec[i], ctx, idx)); return done.join("; "); }
+  if (spec === null || spec === false || lower(spec) === "none") {
+    let removed = 0;
+    ["fills", "strokes", "effects"].forEach(function (key) {
+      const cur = key in n ? n[key] : null;
+      if (!Array.isArray(cur)) return;
+      const keep = cur.filter(function (x) { return x.type !== "SHADER"; });
+      if (keep.length < cur.length) { removed += cur.length - keep.length; n[key] = keep.map(cleanFx); }
+    });
+    return removed ? "removed " + removed + " shader" + (removed > 1 ? "s" : "") : "no shader to remove";
+  }
+  const o = typeof spec === "object" ? spec : { name: spec };
+  const asked = o.target ? SHADER_TARGETS[lower(o.target)] : null;
+  if (o.target && !asked) throw new Error("shader target is 'fill', 'stroke' or 'effect'");
+  const sh = await findShader(o, ctx);
+  let key;
+  if (sh.type === "effect") {
+    if (asked && asked !== "effects") throw new Error('"' + sh.name + '" is an effect shader: it goes on effects, not ' + asked);
+    key = "effects";
+  } else {
+    if (asked === "effects") throw new Error('"' + sh.name + '" is a fill shader: use target \'fill\' or \'stroke\'');
+    key = asked || "fills";
+  }
+  if (!(key in n)) throw new Error(n.type + " has no " + key);
+  const cur = n[key];
+  if (cur === figma.mixed && !o.replace) throw new Error(n.name + " has different " + key + " per text range: pass replace: true to use only the shader");
+  const list = (Array.isArray(cur) ? cur : []).map(cleanFx);
+  const at = list.findIndex(function (x) { return x.type === "SHADER" && x.id === sh.id; });
+  if (o.remove) {
+    if (at < 0) return "shader " + sh.name + " was not on " + key;
+    n[key] = list.filter(function (x) { return !(x.type === "SHADER" && x.id === sh.id); });
+    return "removed shader " + sh.name + " from " + key;
+  }
+  const given = await shaderProps(sh, o.properties || o.props || {}, idx);
+  const update = at >= 0 && !o.replace;
+  let entry;
+  if (update) entry = Object.assign({}, list[at], { properties: Object.assign({}, list[at].properties || {}, given.props) });
+  else { entry = { type: "SHADER", id: sh.id, properties: given.props }; if (key === "effects") entry.visible = true; }
+  if (o.visible !== undefined) entry.visible = !!o.visible;
+  if (key !== "effects") {
+    if (o.opacity !== undefined) entry.opacity = +o.opacity;
+    if (o.blendMode) entry.blendMode = upper(o.blendMode);
+  }
+  let next;
+  if (o.replace) next = [entry];
+  else if (update) { next = list.slice(); next[at] = entry; }
+  else next = list.concat([entry]);   // the last paint is the one on top
+  n[key] = next;
+  let msg = "shader " + sh.name + (update ? " updated on " : " added to ") + key;
+  if (given.names.length) msg += " (" + given.names.join(", ") + ")";
+  else if (!update) {
+    const d = shaderDefs(sh.propertyDefinitions), ks = Object.keys(d);
+    if (ks.length) msg += " · properties: " + ks.map(function (k) { return k + ": " + d[k]; }).join("; ");
+  }
+  return msg;
 }
 async function styleOp(op, ctx, idx) {
   const kind = lower(op.op || "set");
@@ -1368,6 +1553,7 @@ async function applyProps(n, it, ctx, idx) {
   if (it.strokeWeight !== undefined && !take("strokeWeight")) { n.strokeWeight = +it.strokeWeight; ch.push("stroke weight"); }
   if (it.radius !== undefined && !take("radius")) { setRadius(n, it.radius); ch.push("radius"); }
   if (it.effects !== undefined) { n.effects = (it.effects || []).map(effectFrom); ch.push("effects"); }
+  if (it.shader !== undefined) ch.push(await applyShader(n, it.shader, ctx || makeCtx(), idx));
   if (it.textStyle !== undefined) {
     if (n.type !== "TEXT") throw new Error("textStyle only applies to text layers");
     await loadFontsOf(n);
@@ -1574,7 +1760,7 @@ async function auditNode(n, o) {
 
 /* ---------- build: JSON spec → nodes ---------- */
 const PAD = function (p) { return typeof p === "number" ? [p, p, p, p] : (p.length === 2 ? [p[0], p[1], p[0], p[1]] : p); };
-const BUILD_EXTRAS = ["textStyle", "fillStyle", "strokeStyle", "effectStyle", "effects", "variables", "modes", "properties", "opacity", "visible"];
+const BUILD_EXTRAS = ["textStyle", "fillStyle", "strokeStyle", "effectStyle", "effects", "shader", "variables", "modes", "properties", "opacity", "visible"];
 async function buildNode(spec, parent, created, env) {
   const t = String(spec.type || (spec.component ? "INSTANCE" : "FRAME")).toUpperCase();
   let n;
@@ -2256,10 +2442,20 @@ const handlers = {
         res.variableCollections.fromLibraries = lib.filter(function (c) { return match(c.name) || match(c.libraryName); }).map(function (c) { return { library: c.libraryName, name: c.name, key: c.key }; });
       } catch (e) { res.variableCollections.fromLibraries = { error: libError(e).message }; }
     }
-    if (want("shaders") && typeof figma.listAvailableShaders === "function") {
-      try {
+    if (want("shaders")) {
+      if (typeof figma.listAvailableShaders !== "function") { if (kind === "shaders") res.shaders = "This version of Figma has no shader API: update Figma to use shaders."; }
+      else try {
         const sh = await figma.listAvailableShaders();
-        if (sh.length || kind === "shaders") res.shaders = sh.filter(function (s) { return match(s.name); }).slice(0, limit).map(function (s) { return { name: s.name, id: s.id, appliesAs: s.type, imported: s.imported }; });
+        if (sh.length || kind === "shaders") {
+          res.shaders = sh.filter(function (s) { return match(s.name); }).slice(0, limit).map(function (s) {
+            const o = { name: s.name, id: s.id, appliesAs: s.type, imported: s.imported };
+            if (s.propertyDefinitions && Object.keys(s.propertyDefinitions).length) o.properties = shaderDefs(s.propertyDefinitions);
+            return o;
+          });
+          res.shadersHow = sh.length
+            ? "Apply with update_nodes or build: shader: 'Name' or {name, properties: {Name: value}, target: 'fill'|'stroke'}; shader: null removes. A shader is imported on first use and its properties are listed from then on."
+            : "No shaders are available to this file yet: add one in Figma (the Plugin API can apply shaders, not write new ones).";
+        }
       } catch (e) { if (kind === "shaders") res.shaders = { error: String(e && e.message ? e.message : e) }; }
     }
     if (p.used_remote || kind === "used") {

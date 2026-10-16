@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- **Shaders:** `update_nodes` and `build` apply shaders with `shader`: by name, as a fill, stroke or effect, with properties set by name (colours, numbers, booleans, points, gradients, `'{variable}'`). A shader is imported on first use, applying it again updates it, and `shader: null` removes them. `get_library` lists each shader's properties once it's imported, and `get_selection` shows applied shaders by name. Figma's Plugin API can't write new shaders, so they're made or added in Figma.
+- `h.shader(node, spec)` for `run_code`.
+- `status` also tells you when the plugin is newer than the bridge (quit and reopen Claude).
+
 ## 1.2.0
 
 Claude can now see what you're working on, work with variables, styles and libraries, and do the jobs Figma's own agent offers.

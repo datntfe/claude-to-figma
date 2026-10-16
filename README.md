@@ -11,6 +11,7 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost o
 - **Knows what you're working on.** Claude reads your selection (and the text you're editing), the part of the canvas on your screen, and what you did in the last minutes, so "fix this" and "make one like here" just work.
 - **Sees what you see.** `screenshot` exports a layer, the area around your selection, or exactly what's on your screen.
 - **Variables, styles and libraries.** Create and edit variables, modes and aliases, bind them to layers, create styles, use and import library components, styles and variables.
+- **Shaders.** List the shaders available to the file and apply them as a fill, stroke or effect, with their properties set by name (colours, numbers, points, gradients, variables).
 - **Tidy and polish, check designs.** `audit_design` finds default names, hard-coded values that match a variable, off-grid spacing, half pixels, low text contrast and more, and fixes the safe ones. `update_nodes` changes many layers in one go: text, styles, variants, auto layout, prototype links.
 - **Your computer too.** Put images from a folder or a link into the design, and export icons and screens straight into a code project.
 - **Several files at once.** Keep the plugin open in a library file and a product file together; Claude works in both.
@@ -168,7 +169,7 @@ Import the **manifest from this repo**. Don't create a new plugin with Figma's "
 
 ### 4. Check that everything works
 
-1. With Claude open, visit <http://localhost:3055> in a browser. You should see `Claude Figma bridge 1.2.0 is running. Plugin connected: no`.
+1. With Claude open, visit <http://localhost:3055> in a browser. You should see `Claude Figma bridge 1.3.0 is running. Plugin connected: no`.
 2. In Figma, run **Plugins → Development → Claude Bridge**. The dot turns **green**: "Connected: Claude can work in “your file”."
 3. Reload the browser page. It should now say `Plugin connected: yes`.
 4. Ask Claude *"Check the Figma bridge status."* It answers with your file and page name.
@@ -259,9 +260,9 @@ Claude sees these tools. With some clients they're prefixed with the server name
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, any other property, remove. |
+| `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, `shader`, any other property, remove. |
 | `audit_design` | `node_id` or `scope`, `checks`, `fix`, `grid` (default 4) | Design check: default names, values that match a variable, hard-coded colours, text without style, half pixels, off-grid spacing, WCAG contrast, small tap targets, hidden/empty layers, frames without auto layout. `fix: ["bind","round","autolayout"]` applies the safe fixes. |
-| `build` | `spec` (object or array), `parent_id` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes and prototype links. |
+| `build` | `spec` (object or array), `parent_id` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes, shaders and prototype links. |
 | `run_code` | `code` (string, required), `timeout_ms` (default 60000) | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
 | `set_page` | `page_id` or `name`, `create` | Switches page. With `create: true`, a missing page is created. |
 | `delete_nodes` | `ids` | Deletes layers. Pages and the document are never deleted. |
@@ -274,7 +275,7 @@ Claude sees these tools. With some clients they're prefixed with the server name
 | `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit` | Local collections, modes and every value per mode (hex colours, `{aliases}`), scopes, code syntax; with `library: true` also the variables of enabled libraries (with keys). |
 | `set_variables` | `ops`, `save_version` | Batch: create/rename/delete collections and modes, create or update variables (values per mode, aliases, scopes, code syntax, description, hidden), rename, delete. Stops at the first error and reports before → after values. |
 | `bind_variables` | `bindings`, `modes`, `save_version` | Bind variables (local or library, by name) to fills, strokes, sizes, spacing, padding, radius, opacity, visibility, text and typography; set or reset a frame's mode per collection. |
-| `get_library` | `kind`, `query`, `used_remote`, `limit` | Local styles with values, local components and sets (keys, variants, properties), variable collections (local and library), shaders, and the library components used on the page. |
+| `get_library` | `kind`, `query`, `used_remote`, `limit` | Local styles with values, local components and sets (keys, variants, properties), variable collections (local and library), shaders (with their properties once imported), and the library components used on the page. |
 | `set_styles` | `ops`, `save_version` | Create, update, rename or delete paint, text, effect and grid styles; bind style colours and typography to variables. |
 | `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y` | Import a published variable, style, component or component set by key; components are placed as instances. |
 
@@ -306,6 +307,7 @@ Claude sees these tools. With some clients they're prefixed with the server name
 | `await h.update(node, changes)` | Applies the same changes as one `update_nodes` item |
 | `await h.link(node, target, opts?)` | Prototype link (`'back'`, a node or id; `{ transition, duration }`) |
 | `await h.component(nameOrKey, variant?)` | A component to instantiate (local name or `key:…`) |
+| `await h.shader(node, spec)` | Applies a shader, as `shader` in `update_nodes` (`null` removes them) |
 
 Return values are converted to JSON:
 
@@ -388,6 +390,21 @@ Using the design system:
 ```
 
 `build` returns the root ids and how many layers it created. New frames are transparent unless you give them a `fill`. `link` can name another layer created in the same call.
+
+### Shaders
+
+`get_library` with `kind: "shaders"` lists the shaders available to the file: the ones in it, from enabled libraries and your own. `update_nodes` and `build` apply one with `shader`:
+
+```jsonc
+{ "id": "12:34", "shader": { "name": "Film grain", "properties": { "Amount": 0.4, "Tint": "#7C3AED80" } } }
+{ "id": "12:35", "shader": { "name": "Mesh gradient", "properties": { "Colors": ["#0A0912", "#7C3AED"], "Center": [0.5, 0.3], "Glow": "{color/brand}" } } }
+{ "id": "12:35", "shader": null }   // remove every shader from the layer
+```
+
+- A shader is imported into the file the first time it's used. Its properties are then listed by `get_library`, and the first `update_nodes` result names them.
+- Properties go by name. Values: `'#RRGGBB'` or `'#RRGGBBAA'` for colours, numbers, `true`/`false`, `[x, y]` for points, a list of colours (or `{position, color}` stops) for gradients, and `'{variable}'` to bind a variable.
+- Effect shaders go on `effects`; fill shaders go on `fills` (on top of the paints already there) or, with `target: "stroke"`, on `strokes`. `replace: true` keeps only the shader, `remove: true` removes that one shader, and applying a shader the layer already has updates its properties.
+- Figma's Plugin API can apply shaders but not write new ones: make or add the shader in Figma first.
 
 ---
 
@@ -548,7 +565,7 @@ The tests use ports 3997–3999, so they don't touch a bridge running on 3055.
 
 ```jsonc
 // plugin → server, on connect
-{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.2.0", "session": "…" } }
+{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.3.0", "session": "…" } }
 // plugin → server, while open
 { "type": "info", "info": { "page": "…" } }          // page changed
 { "type": "activity", "what": "select" }               // the user did something here (at most once a second)

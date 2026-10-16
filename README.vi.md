@@ -11,6 +11,7 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, chỉ trong
 - **Biết bạn đang làm gì.** Claude đọc được vùng chọn (cả đoạn text đang sửa), phần canvas đang hiện trên màn hình và những thao tác vài phút gần đây, nên chỉ cần nói "sửa cái này", "làm giống chỗ này".
 - **Thấy cái bạn đang thấy.** `screenshot` chụp một layer, vùng quanh các layer đang chọn, hoặc đúng phần đang hiện trên màn hình.
 - **Variables, styles và library.** Tạo, sửa variable, mode, alias, gắn variable vào layer, tạo style, dùng và import component, style, variable từ library.
+- **Shader.** Xem các shader file đang dùng được và áp chúng làm fill, stroke hoặc effect, chỉnh property theo tên (màu, số, điểm, gradient, variable).
 - **Dọn dẹp và soát thiết kế.** `audit_design` tìm tên layer mặc định, giá trị hard-code trùng variable, spacing lệch grid, lệch pixel, chữ thiếu tương phản…, và tự sửa phần an toàn. `update_nodes` sửa hàng loạt layer một lần: text, style, variant, auto layout, link prototype.
 - **Làm cả với file trên máy.** Đưa ảnh từ thư mục hoặc link vào thiết kế, export icon và màn hình thẳng vào thư mục code.
 - **Nhiều file cùng lúc.** Mở plugin ở cả file library và file sản phẩm, Claude làm được ở cả hai.
@@ -168,7 +169,7 @@ Import **đúng file manifest của repo này**. Đừng tạo plugin mới bằ
 
 ### 4. Kiểm tra mọi thứ đã chạy
 
-1. Khi Claude đang mở, vào <http://localhost:3055> trên trình duyệt. Phải thấy dòng `Claude Figma bridge 1.2.0 is running. Plugin connected: no`.
+1. Khi Claude đang mở, vào <http://localhost:3055> trên trình duyệt. Phải thấy dòng `Claude Figma bridge 1.3.0 is running. Plugin connected: no`.
 2. Trong Figma, chạy **Plugins → Development → Claude Bridge**. Chấm chuyển **xanh**, kèm dòng "Connected: Claude can work in “tên file”."
 3. Tải lại trang trình duyệt. Lúc này phải thấy `Plugin connected: yes`.
 4. Nhắn Claude *"Kiểm tra trạng thái Figma bridge."* Claude sẽ trả lời kèm tên file và page bạn đang mở.
@@ -259,9 +260,9 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 
 | Công cụ | Tham số | Việc |
 |---|---|---|
-| `update_nodes` | `items: [{ id \| ids, …thay đổi }]`, `save_version` | Sửa hàng loạt không cần code: tên, text, font, cỡ chữ, màu, stroke, bo góc, effect, style, auto layout (cả `mode: "AUTO"` tự suy ra từ vị trí hiện tại), sizing, variable (`'{tên}'`), mode, variant, property của component, swap, `link` prototype, thuộc tính bất kỳ, xoá. |
+| `update_nodes` | `items: [{ id \| ids, …thay đổi }]`, `save_version` | Sửa hàng loạt không cần code: tên, text, font, cỡ chữ, màu, stroke, bo góc, effect, style, auto layout (cả `mode: "AUTO"` tự suy ra từ vị trí hiện tại), sizing, variable (`'{tên}'`), mode, variant, property của component, swap, `link` prototype, `shader`, thuộc tính bất kỳ, xoá. |
 | `audit_design` | `node_id` hoặc `scope`, `checks`, `fix`, `grid` (mặc định 4) | Soát thiết kế: tên mặc định, giá trị trùng variable, màu hard-code, text không có style, lệch pixel, spacing lệch grid, tương phản WCAG, vùng bấm nhỏ, layer ẩn/rỗng, frame chưa dùng auto layout. `fix: ["bind","round","autolayout"]` để tự sửa phần an toàn. |
-| `build` | `spec` (object hoặc mảng), `parent_id` | Tạo layer từ mô tả JSON, kể cả instance của component local hay library, giá trị `'{variable}'`, style, mode và link prototype. |
+| `build` | `spec` (object hoặc mảng), `parent_id` | Tạo layer từ mô tả JSON, kể cả instance của component local hay library, giá trị `'{variable}'`, style, mode, shader và link prototype. |
 | `run_code` | `code` (chuỗi, bắt buộc), `timeout_ms` (mặc định 60000) | Chạy JavaScript trong plugin với toàn bộ Figma Plugin API. Trả về `{ value, logs }`. |
 | `set_page` | `page_id` hoặc `name`, `create` | Chuyển page. Có `create: true` thì tạo page nếu chưa có. |
 | `delete_nodes` | `ids` | Xoá layer. Không bao giờ xoá page hay cả document. |
@@ -274,7 +275,7 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 | `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit` | Collection local, các mode và giá trị từng mode (màu hex, `{alias}`), scope, code syntax; thêm `library: true` để xem cả variable của library đã bật (kèm key). |
 | `set_variables` | `ops`, `save_version` | Một lần nhiều thao tác: tạo/đổi tên/xoá collection và mode, tạo hoặc sửa variable (giá trị theo mode, alias, scope, code syntax, mô tả, ẩn khi publish), đổi tên, xoá. Dừng ở lỗi đầu tiên và báo giá trị trước → sau. |
 | `bind_variables` | `bindings`, `modes`, `save_version` | Gắn variable (local hay library, theo tên) vào fill, stroke, kích thước, spacing, padding, bo góc, opacity, ẩn/hiện, text và typography; đặt hoặc trả mode của frame theo từng collection. |
-| `get_library` | `kind`, `query`, `used_remote`, `limit` | Style local kèm giá trị, component và component set local (key, variant, property), collection variable (local và library), shader, và các component library đang dùng trên page. |
+| `get_library` | `kind`, `query`, `used_remote`, `limit` | Style local kèm giá trị, component và component set local (key, variant, property), collection variable (local và library), shader (kèm property khi đã import), và các component library đang dùng trên page. |
 | `set_styles` | `ops`, `save_version` | Tạo, sửa, đổi tên, xoá paint/text/effect/grid style; gắn màu và typography của style vào variable. |
 | `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y` | Import variable, style, component hay component set đã publish theo key; component được đặt thành instance. |
 
@@ -306,6 +307,7 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 | `await h.update(node, thay đổi)` | Áp dụng giống một item của `update_nodes` |
 | `await h.link(node, đích, opts?)` | Link prototype (`'back'`, một node hoặc id; `{ transition, duration }`) |
 | `await h.component(tên hoặc key, variant?)` | Lấy component để tạo instance (tên local hoặc `key:…`) |
+| `await h.shader(node, spec)` | Áp shader, giống `shader` trong `update_nodes` (`null` để gỡ hết) |
 
 Giá trị trả về được đổi sang JSON:
 
@@ -388,6 +390,21 @@ Dùng design system:
 ```
 
 `build` trả về id của các node gốc và số layer đã tạo. Frame mới mặc định trong suốt nếu không có `fill`. `link` có thể ghi tên một layer khác tạo trong cùng lần gọi.
+
+### Shader
+
+`get_library` với `kind: "shaders"` liệt kê các shader file dùng được: shader có sẵn trong file, từ library đang bật và của chính bạn. `update_nodes` và `build` áp shader bằng `shader`:
+
+```jsonc
+{ "id": "12:34", "shader": { "name": "Film grain", "properties": { "Amount": 0.4, "Tint": "#7C3AED80" } } }
+{ "id": "12:35", "shader": { "name": "Mesh gradient", "properties": { "Colors": ["#0A0912", "#7C3AED"], "Center": [0.5, 0.3], "Glow": "{color/brand}" } } }
+{ "id": "12:35", "shader": null }   // gỡ mọi shader khỏi layer
+```
+
+- Shader được import vào file ở lần dùng đầu tiên. Từ đó `get_library` liệt kê property của nó, và kết quả `update_nodes` đầu tiên cũng ghi tên các property.
+- Property ghi theo tên. Giá trị: `'#RRGGBB'` hoặc `'#RRGGBBAA'` cho màu, số, `true`/`false`, `[x, y]` cho điểm, danh sách màu (hoặc stop `{position, color}`) cho gradient, và `'{variable}'` để gắn variable.
+- Shader loại effect nằm ở `effects`; shader loại fill nằm ở `fills` (trên các paint đang có) hoặc ở `strokes` với `target: "stroke"`. `replace: true` chỉ giữ lại shader, `remove: true` gỡ đúng shader đó, còn áp lại shader layer đã có thì chỉ cập nhật property.
+- Plugin API của Figma áp được shader nhưng không viết được shader mới: tạo hoặc thêm shader trong Figma trước.
 
 ---
 
@@ -548,7 +565,7 @@ Test dùng cổng 3997–3999 nên không đụng tới bridge đang chạy trê
 
 ```jsonc
 // plugin → server, khi vừa kết nối
-{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.2.0", "session": "…" } }
+{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.3.0", "session": "…" } }
 // plugin → server, trong lúc mở
 { "type": "info", "info": { "page": "…" } }          // đổi page
 { "type": "activity", "what": "select" }               // người dùng vừa thao tác ở file này (tối đa 1 lần/giây)

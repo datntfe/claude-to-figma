@@ -213,6 +213,42 @@ function makeStyle(type, extra) {
   return s;
 }
 
+/* shaders: an effect shader and a fill shader. Like Figma: applying one that isn't imported fails, properties are
+   keyed by definition id, and reads come back with every property (defaults included) and propertyMetadata. */
+const SHADERS = [
+  { id: "shader-grain", name: "Film grain", type: "effect", imported: false, defs: { "p:amt": { name: "Amount", type: "NUMBER", defaultValue: 0.3 }, "p:tint": { name: "Tint", type: "COLOR", defaultValue: { r: 0, g: 0, b: 0, a: 1 } }, "p:mono": { name: "Monochrome", type: "BOOLEAN", defaultValue: true } } },
+  { id: "shader-mesh", name: "Mesh gradient", type: "fill", imported: true, defs: { "p:colors": { name: "Colors", type: "GRADIENT" }, "p:center": { name: "Center", type: "POINT", defaultValue: { x: 0.5, y: 0.5 } }, "p:glow": { name: "Glow color", type: "COLOR" } } }
+];
+const shaderImports = [];
+function shaderOut(s) { const o = { id: s.id, name: s.name, type: s.type, imported: s.imported }; if (s.imported) o.propertyDefinitions = s.defs; return o; }
+function guardFx(n) {
+  for (const key of ["fills", "strokes", "effects"]) {
+    let val = n[key] || [];
+    Object.defineProperty(n, key, {
+      get() { return val; },
+      set(v) {
+        for (const x of v) {
+          if (x.type !== "SHADER") continue;
+          const s = SHADERS.find((q) => q.id === x.id);
+          if (!s) { errors.push("unknown shader " + x.id); continue; }
+          if (!s.imported) errors.push("Shader not imported. Call figma.importShaderById(id) first.");
+          if ((s.type === "effect") !== (key === "effects")) errors.push(s.name + " applied to " + key);
+          for (const k of Object.keys(x.properties || {})) if (!s.defs[k]) errors.push("unknown shader property " + k);
+          if ("propertyMetadata" in x) errors.push("propertyMetadata written back");
+          if (key === "effects" && typeof x.visible !== "boolean") errors.push("shader effect without visible");
+        }
+        val = v.map((x) => {
+          if (x.type !== "SHADER") return x;
+          const s = SHADERS.find((q) => q.id === x.id), props = {};
+          if (s) for (const k of Object.keys(s.defs)) if (s.defs[k].defaultValue !== undefined) props[k] = s.defs[k].defaultValue;
+          return Object.assign({}, x, { properties: Object.assign(props, x.properties || {}), propertyMetadata: s ? s.defs : {} });
+        });
+      },
+      configurable: true, enumerable: true
+    });
+  }
+}
+
 /* document */
 const doc = node("DOCUMENT", { name: "Take-home.fig" });
 const page1 = node("PAGE", { name: "Page 1" }); doc.appendChild(page1);
@@ -253,7 +289,8 @@ const figma = {
     const hash = "imghash" + (++imgSeq);
     return { hash, async getSizeAsync() { return { width: 640, height: 480 }; } };
   },
-  async listAvailableShaders() { return [{ id: "shader-grain", name: "Film grain", type: "effect", imported: false }]; },
+  async listAvailableShaders() { return SHADERS.map(shaderOut); },
+  async importShaderById(id) { const s = SHADERS.find((x) => x.id === id); if (!s) throw new Error("Shader not found"); s.imported = true; shaderImports.push(id); return shaderOut(s); },
   getSelectionColors() { return { paints: current.selection.flatMap((n) => (n.fills && n.fills !== MIXED ? n.fills : [])), styles: [] }; },
   viewport: {
     get center() { return viewport.center; }, set center(c) { viewport.center = c; },
@@ -324,10 +361,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.2.0"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.3.0"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.2.0"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.3.0"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -578,7 +615,63 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   r = await cmd("import_from_library", { kind: "style", key: "nope" });
   assert.ok(!r.ok); console.log("import_from_library OK");
   r = ok(await cmd("get_library", { kind: "shaders" }));
-  assert.equal(r.shaders[0].name, "Film grain"); console.log("shaders listed OK");
+  assert.equal(r.shaders[0].name, "Film grain"); assert.ok(!r.shaders[0].properties, "not imported yet");
+  assert.equal(r.shaders[1].properties.Colors, "gradient"); assert.equal(r.shaders[1].properties.Center, "point (default (0.5, 0.5))");
+  assert.ok(/update_nodes/.test(r.shadersHow)); console.log("shaders listed OK");
+
+  /* shaders: imported on first use, properties by name, effect vs fill, updated in place, removed */
+  const grainBox = figma.createRectangle(); grainBox.name = "Grain box"; guardFx(grainBox);
+  grainBox.effects = [{ type: "DROP_SHADOW", color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 4 }, radius: 8, spread: 0, visible: true, blendMode: "NORMAL" }];
+  r = ok(await cmd("update_nodes", { items: [{ id: grainBox.id, shader: { name: "film grain", properties: { amount: 0.6, Tint: "#FF000080" } } }] }));
+  assert.ok(/shader Film grain added to effects \(Amount, Tint\)/.test(r.done[0]), r.done[0]);
+  assert.deepEqual(shaderImports, ["shader-grain"], "imported once, on first use");
+  assert.equal(grainBox.effects.length, 2); assert.equal(grainBox.effects[0].type, "DROP_SHADOW", "existing effects kept");
+  let fx = grainBox.effects[1];
+  assert.equal(fx.properties["p:amt"], 0.6); assert.equal(fx.properties["p:tint"].r, 1); assert.ok(Math.abs(fx.properties["p:tint"].a - 128 / 255) < 1e-9);
+  r = ok(await cmd("update_nodes", { items: [{ id: grainBox.id, shader: { name: "Film grain", properties: { "Monochrome": "off" } } }] }));
+  assert.ok(/updated on effects \(Monochrome\)/.test(r.done[0]), r.done[0]);
+  fx = grainBox.effects[1];
+  assert.equal(grainBox.effects.length, 2, "applying it again updates, no duplicate");
+  assert.equal(fx.properties["p:mono"], false); assert.equal(fx.properties["p:amt"], 0.6, "other properties kept");
+  r = ok(await cmd("run_code", { code: "return await h.describe(await figma.getNodeByIdAsync('" + grainBox.id + "'))" }));
+  assert.ok(r.value.effects[1].indexOf("shader Film grain (Amount 0.6, Tint #FF000080, Monochrome false)") === 0, r.value.effects[1]);
+  // a fill shader goes on fills (on top) or strokes; gradients and points from short forms; a colour bound to a variable
+  r = ok(await cmd("update_nodes", { items: [
+    { id: grainBox.id, shader: { name: "Mesh", properties: { Colors: ["#000000", "#FFFFFF"], Center: [0.25, 0.75], "glow color": "{bg/surface}" } } },
+    { id: grainBox.id, shader: { name: "Mesh gradient", target: "effect" } },
+    { id: grainBox.id, shader: { name: "Film grain", target: "stroke" } },
+    { id: grainBox.id, shader: { name: "Film grain", properties: { Speed: 2 } } },
+    { id: grainBox.id, shader: "Plasma" }
+  ] }));
+  const mesh = grainBox.fills[grainBox.fills.length - 1];
+  assert.equal(grainBox.fills.length, 2); assert.equal(grainBox.fills[0].type, "SOLID"); assert.equal(mesh.type, "SHADER");
+  assert.deepEqual(mesh.properties["p:colors"].stops.map((s) => s.position), [0, 1]); assert.equal(mesh.properties["p:colors"].stops[1].color.g, 1);
+  assert.deepEqual(mesh.properties["p:center"], { x: 0.25, y: 0.75 });
+  assert.equal(mesh.properties["p:glow"].type, "VARIABLE_ALIAS"); assert.equal(mesh.properties["p:glow"].id, variables.find((v) => v.name === "bg/surface").id);
+  assert.equal(r.errors.length, 4);
+  assert.ok(/is a fill shader/.test(r.errors[0].error) && /is an effect shader/.test(r.errors[1].error), JSON.stringify(r.errors));
+  assert.ok(/no property "Speed".*Amount \(number\)/.test(r.errors[2].error), r.errors[2].error);
+  assert.ok(/No shader "Plasma".*Available: Film grain, Mesh gradient/.test(r.errors[3].error), r.errors[3].error);
+  r = ok(await cmd("run_code", { code: "return await h.describe(await figma.getNodeByIdAsync('" + grainBox.id + "'))" }));
+  assert.ok(/^shader Mesh gradient \(.*Glow color ← bg\/surface/.test(r.value.fills[1]), r.value.fills[1]);
+  r = ok(await cmd("get_library", { kind: "shaders", query: "grain" }));
+  assert.equal(r.shaders.length, 1); assert.equal(r.shaders[0].properties.Amount, "number (default 0.3)", "properties listed once imported");
+  // remove one shader, then every shader; other paints and effects stay
+  r = ok(await cmd("update_nodes", { items: [{ id: grainBox.id, shader: { name: "Mesh gradient", remove: true } }] }));
+  assert.equal(grainBox.fills.length, 1); assert.ok(/removed shader Mesh gradient from fills/.test(r.done[0]));
+  ok(await cmd("update_nodes", { items: [{ id: grainBox.id, shader: { name: "Mesh gradient", target: "stroke", opacity: 0.5 } }] }));
+  assert.equal(grainBox.strokes[0].type, "SHADER"); assert.equal(grainBox.strokes[0].opacity, 0.5);
+  r = ok(await cmd("update_nodes", { items: [{ id: grainBox.id, shader: null }] }));
+  assert.ok(/removed 2 shaders/.test(r.done[0]), r.done[0]);
+  assert.equal(grainBox.effects.length, 1); assert.equal(grainBox.effects[0].type, "DROP_SHADOW"); assert.equal(grainBox.strokes.length, 0); assert.equal(grainBox.fills.length, 1);
+  // build and run_code
+  r = ok(await cmd("build", { spec: { type: "RECTANGLE", name: "Noisy card", size: [200, 120], fill: "#222222", shader: { name: "Film grain", properties: { Amount: 0.2 } } } }));
+  const noisy = all.get(r.roots[0].id);
+  assert.equal(noisy.effects[0].type, "SHADER"); assert.equal(noisy.effects[0].properties["p:amt"], 0.2); assert.equal(noisy.effects[0].visible, true);
+  r = ok(await cmd("run_code", { code: "const n = await figma.getNodeByIdAsync('" + noisy.id + "'); return await h.shader(n, null)" }));
+  assert.equal(r.value, "removed 1 shader"); assert.equal(noisy.effects.length, 0);
+  ok(await cmd("delete_nodes", { ids: [grainBox.id, noisy.id] }));
+  console.log("shaders applied, updated and removed OK");
 
   /* batch edits: text, styles, variables, variants, properties, prototype links */
   r = ok(await cmd("update_nodes", { items: [
@@ -755,7 +848,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.2.0");
+  assert.equal(sandbox.__claudeBridge.version, "1.3.0");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });
