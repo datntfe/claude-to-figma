@@ -15,6 +15,7 @@ echo "Node: $NODE ($("$NODE" -v))"
 if [ "$SRC" != "$DEST" ]; then
   mkdir -p "$DEST"
   cp -R "$SRC/server" "$SRC/figma-plugin" "$DEST/"
+  if [ -d "$SRC/assets" ]; then cp -R "$SRC/assets" "$DEST/"; fi
   cp "$SRC/install-mac.sh" "$DEST/" 2>/dev/null || true
   for f in README.md README.vi.md HUONG-DAN.md CHANGELOG.md package.json; do [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DEST/"; done
 fi

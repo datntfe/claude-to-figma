@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/cover.png" alt="Claude to Figma: let Claude work directly in the Figma file you have open" width="100%"></p>
+
 # Claude to Figma (Claude Bridge)
 
 **English** · [Tiếng Việt](README.vi.md)
