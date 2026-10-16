@@ -8,11 +8,15 @@ Let Claude work directly in the Figma file you have open: draw screens, edit lay
 Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost only)──► "Claude Bridge" plugin in Figma desktop
 ```
 
-- **No dependencies.** The server is one Node.js file (Node 18+). The plugin is plain JavaScript. There is nothing to `npm install`.
-- **Full Plugin API.** Anything a Figma plugin can do, Claude can do through `run_code`: create, restyle, rename, auto layout, components, prototype links and more.
-- **Claude can see its work.** `screenshot` exports any layer as PNG and returns it to Claude as an image.
-- **Local only.** The server listens on `127.0.0.1` / `::1`. Nothing is sent anywhere except between Claude and Figma on your own computer.
-- **Several Claude windows at once.** The first server copy owns the port and the others relay through it, so Claude desktop, Cowork and Claude Code can all share one Figma connection.
+- **Knows what you're working on.** Claude reads your selection (and the text you're editing), the part of the canvas on your screen, and what you did in the last minutes, so "fix this" and "make one like here" just work.
+- **Sees what you see.** `screenshot` exports a layer, the area around your selection, or exactly what's on your screen.
+- **Variables, styles and libraries.** Create and edit variables, modes and aliases, bind them to layers, create styles, use and import library components, styles and variables.
+- **Tidy and polish, check designs.** `audit_design` finds default names, hard-coded values that match a variable, off-grid spacing, half pixels, low text contrast and more, and fixes the safe ones. `update_nodes` changes many layers in one go: text, styles, variants, auto layout, prototype links.
+- **Your computer too.** Put images from a folder or a link into the design, and export icons and screens straight into a code project.
+- **Several files at once.** Keep the plugin open in a library file and a product file together; Claude works in both.
+- **Quick actions.** Ready-made prompts (Tidy and polish, Check design, Generate a design, Rewrite or translate text, Edit variables, Make a prototype, Hand off to code, Edit a library).
+- **Full Plugin API.** Anything a Figma plugin can do, Claude can do through `run_code`.
+- **No dependencies, local only.** The server is one Node.js file (Node 18+) that listens on `127.0.0.1` / `::1`; the plugin is plain JavaScript. Several Claude windows (desktop, Cowork, Claude Code) share one connection.
 
 ---
 
@@ -22,13 +26,15 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost o
 2. [Quick start (macOS + Claude desktop)](#quick-start-macos--claude-desktop)
 3. [Setup in detail](#setup-in-detail)
 4. [Using it day to day](#using-it-day-to-day)
-5. [Tool reference](#tool-reference)
-6. [Writing good `run_code`](#writing-good-run_code)
-7. [How it works](#how-it-works)
-8. [Troubleshooting](#troubleshooting)
-9. [Security](#security)
-10. [Uninstall](#uninstall)
-11. [Development](#development)
+5. [Quick actions](#quick-actions)
+6. [Libraries and several files](#libraries-and-several-files)
+7. [Tool reference](#tool-reference)
+8. [Writing good `run_code`](#writing-good-run_code)
+9. [How it works](#how-it-works)
+10. [Troubleshooting](#troubleshooting)
+11. [Security](#security)
+12. [Uninstall](#uninstall)
+13. [Development](#development)
 
 ---
 
@@ -162,8 +168,8 @@ Import the **manifest from this repo**. Don't create a new plugin with Figma's "
 
 ### 4. Check that everything works
 
-1. With Claude open, visit <http://localhost:3055> in a browser. You should see `Claude Figma bridge 1.1.0 is running. Plugin connected: no`.
-2. In Figma, run **Plugins → Development → Claude Bridge**. The dot turns **green**: "Connected. Claude can now work in this file."
+1. With Claude open, visit <http://localhost:3055> in a browser. You should see `Claude Figma bridge 1.2.0 is running. Plugin connected: no`.
+2. In Figma, run **Plugins → Development → Claude Bridge**. The dot turns **green**: "Connected: Claude can work in “your file”."
 3. Reload the browser page. It should now say `Plugin connected: yes`.
 4. Ask Claude *"Check the Figma bridge status."* It answers with your file and page name.
 
@@ -188,40 +194,96 @@ The plugin window shows:
 
 ### Example requests
 
-- *"Check the Figma bridge status and list the pages."*
-- *"On a new page called 'Explorations', draw a 390×844 mobile sign-in screen using Inter, then take a screenshot and fix anything that looks off."*
-- *"Look at my selection and tell me which text layers aren't using our type scale (12/14/16/20/24/32)."*
-- *"Rename every top-level frame on this page to 'Screen / <current name>'."*
-- *"Duplicate the selected frame and make a dark-mode version next to it."*
-- *"Convert the selected group into an auto layout frame with 16px padding and 12px gap."*
-- *"Link the 'Continue' button on Login to the Home frame with a Smart Animate transition."*
+- *"What am I working on? Make the card I selected consistent with the others on screen."*
+- *"Tidy and polish this frame."* · *"Check this screen for contrast and design-system problems."*
+- *"Translate all the text in the selected screens to English, keep it short."*
+- *"Add a Dark mode to the Theme collection and fill it from the gray scale."*
+- *"Design a reward popup with our Button and Card components and our color variables, next to the Home screen."*
+- *"Put the photos from ~/Pictures/pets into the four cards."* · *"Export the icons on this page as SVG into ~/code/app/assets/icons."*
+- *"Link every 'Continue' button to the next screen with Smart Animate."*
 
-Claude usually calls `status` first, uses `run_code` to draw, then `screenshot` to check the result. When it finishes, it uses `focus` to zoom your view to what changed.
+Claude usually calls `get_context` to see what you mean, works with the tools below, then takes a `screenshot` to check the result and uses `focus` to zoom your view to what changed.
 
 ### Tips
 
-- **Save a version first.** Before a big change, use **File → Save to version history** so you can always go back.
-- **Point Claude at layers.** Select layers in Figma and say "the selection", or paste a layer link. Claude can read `node-id` from a Figma URL.
-- **One Figma window.** If the plugin runs in two Figma files, the one started last takes over the connection.
+- **Every Claude change is one Cmd+Z.** Each tool call is its own undo step in Figma. Before a big change, Claude can also save a named version (`save_version`) so you can go back in version history.
+- **Point Claude at layers.** Select layers, put the area you mean on screen, or paste a layer link. Claude reads your selection, your screen and your recent edits (from the moment the plugin was opened).
+- **Several files.** The plugin can be open in several Figma files at once; see [Libraries and several files](#libraries-and-several-files).
+
+---
+
+## Quick actions
+
+The bridge offers ready-made prompts, like the suggestions in Figma's own agent. In Claude desktop chat they're in the **+** menu under *figma-bridge*; in Claude Code they're slash commands such as `/mcp__figma-bridge__tidy`. You can also just ask in your own words: Claude reads the same playbooks from the tool descriptions.
+
+| Prompt | What Claude does |
+|---|---|
+| **context** — What am I working on? | Looks at your selection, your screen and recent edits, and asks what you want to do. |
+| **tidy** — Tidy and polish | Audits the selection, applies the safe fixes (bind matching variables, whole pixels), names layers, snaps spacing, adds auto layout where it helps, shows before/after. |
+| **check** — Check design | Contrast (WCAG AA), design-system usage and polish report. Changes nothing. |
+| **design** — Generate a design | Learns your components, styles and variables, then builds the design with them. |
+| **text** — Rewrite or translate | Collects every text layer, rewrites or translates them in one batch, checks for overflow. |
+| **tokens** — Edit variables | Plans and applies variable changes with a restore point, then binds layers. |
+| **prototype** — Make a prototype | Links buttons to screens with transitions, back actions and overlays. |
+| **handoff** — Hand off to code | Exports assets into your project and writes the code with your tokens. |
+| **library** — Edit a library | Walks through changing a library file safely and reminds you to publish. |
+
+---
+
+## Libraries and several files
+
+- **Library items are read-only where they're used.** In a product file, Claude can list, use, bind and import library variables, styles and components, but not change them. That's how Figma works for every plugin.
+- **To change a library, open the library file** and run Claude Bridge there too. Claude Bridge can be open in several files at the same time: the library and the product files. Claude then edits the library file directly (variables, modes, styles, components) and you **publish** it from the Assets panel. Publishing and accepting updates stay manual in Figma.
+- **Which file?** Reads go to the file you were last active in (selected, edited, scrolled or switched to). When several files are open, changes need the file's name (`file: "Savepet DS"`), so nothing lands in the wrong file. `status` lists the open files.
+- **Library variables need the library enabled.** Claude sees variables from libraries enabled for the file (Assets panel → Libraries). Library components and styles that aren't used in the file yet can be imported by key.
 
 ---
 
 ## Tool reference
 
-Claude sees these tools. With some clients they're prefixed with the server name, e.g. `figma-bridge__run_code`.
+Claude sees these tools. With some clients they're prefixed with the server name, e.g. `figma-bridge__run_code`. Every tool also takes `file`, to pick a file when the plugin is open in several (see [Libraries and several files](#libraries-and-several-files)).
+
+**Seeing what you work on**
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `status` | — | Is the plugin connected? Returns `connected`, `role` (hub/relay), `port`, `version`, `file`, `page`, `editorType`, `selection` (count). |
-| `run_code` | `code` (string, required), `timeout_ms` (default 60000) | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
-| `screenshot` | `node_id`, `scale` (default 1), `max_size` (default 1600) | Exports a node (or the first selected layer) as PNG and returns it as an image. The longest side is capped at `max_size`. |
-| `get_selection` | `depth` (default 2) | Describes the current selection: ids, names, types, positions, sizes, text, children. |
+| `status` | — | Is the plugin connected? `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (count), `plugin_version`, the open `files` when there are several, and `notes` when something needs updating. |
+| `get_context` | `activity` (default 15), `since_seconds`, `depth` (default 2), `max_layers` | What you're looking at and doing: file, page, selection (and text being edited), the viewport (zoom, bounds, the frame in focus at the centre of the screen, the layers in view) and recent activity (select, edit, create, delete, page, viewport, styles; by you, a collaborator or Claude). |
+| `get_selection` | `depth` (default 1), `brief` | Full details of each selected layer: path, position, size, fills/strokes as hex, radius, effects, auto layout and sizing, text and typography, styles, bound variables, variable modes, component info (main component, variant, key, library or local, property values), plus the colours in the selection. |
+| `screenshot` | `node_id`, `viewport`, `scale`, `max_size` (default 1600) | An image of a layer; or with `viewport: true` exactly what's on your screen. No arguments: the selected layer, the area around several selected layers, or your screen. |
 | `get_tree` | `node_id`, `depth` (default 2) | Layer tree of a node, or of the current page. |
+| `find_nodes` | `scope` (page/selection/file) or `node_id`, `type`, `name`, `text`, `component`, `limit` | Search layers by type, name (or `/regex/`), text content or component; flat list with ids, paths, text, fonts and text styles. |
 | `list_pages` | — | All pages, plus the current one. |
+
+**Changing things**
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, any other property, remove. |
+| `audit_design` | `node_id` or `scope`, `checks`, `fix`, `grid` (default 4) | Design check: default names, values that match a variable, hard-coded colours, text without style, half pixels, off-grid spacing, WCAG contrast, small tap targets, hidden/empty layers, frames without auto layout. `fix: ["bind","round","autolayout"]` applies the safe fixes. |
+| `build` | `spec` (object or array), `parent_id` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes and prototype links. |
+| `run_code` | `code` (string, required), `timeout_ms` (default 60000) | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
 | `set_page` | `page_id` or `name`, `create` | Switches page. With `create: true`, a missing page is created. |
-| `build` | `spec` (object or array), `parent_id` | Creates layers from a JSON description, no code needed. |
 | `delete_nodes` | `ids` | Deletes layers. Pages and the document are never deleted. |
 | `focus` | `ids` | Switches to the right page, selects the layers and zooms the viewport to them. |
+
+**Variables, styles and libraries**
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit` | Local collections, modes and every value per mode (hex colours, `{aliases}`), scopes, code syntax; with `library: true` also the variables of enabled libraries (with keys). |
+| `set_variables` | `ops`, `save_version` | Batch: create/rename/delete collections and modes, create or update variables (values per mode, aliases, scopes, code syntax, description, hidden), rename, delete. Stops at the first error and reports before → after values. |
+| `bind_variables` | `bindings`, `modes`, `save_version` | Bind variables (local or library, by name) to fills, strokes, sizes, spacing, padding, radius, opacity, visibility, text and typography; set or reset a frame's mode per collection. |
+| `get_library` | `kind`, `query`, `used_remote`, `limit` | Local styles with values, local components and sets (keys, variants, properties), variable collections (local and library), shaders, and the library components used on the page. |
+| `set_styles` | `ops`, `save_version` | Create, update, rename or delete paint, text, effect and grid styles; bind style colours and typography to variables. |
+| `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y` | Import a published variable, style, component or component set by key; components are placed as instances. |
+
+**Files on your computer**
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `place_image` | `source` (path, https link or data: URL), `node_id`, `add`, `parent_id`, `x`, `y`, `width`, `height`, `scale_mode` | PNG/JPEG/GIF become image fills (on a layer or a new rectangle); SVG files become vector layers. |
+| `export_nodes` | `ids` (default selection), `format` (PNG/JPG/SVG/PDF), `scale`, `dir`, `overwrite` | Writes the exports into a folder (default `~/Figma Exports/<file>`) and returns the paths. |
 
 ### `run_code` in detail
 
@@ -237,6 +299,13 @@ Claude sees these tools. With some clients they're prefixed with the server name
 | `h.svg(markup, width?)` | Creates a node from SVG, optionally scaled to `width` |
 | `h.paints(v)` | `'#RRGGBB'`, `'#RRGGBB@0.5'`, a Paint, or an array of either → Paint[] |
 | `h.summary(node, depth?)` | Returns a small JSON description of a node |
+| `h.color('#RRGGBBAA')`, `h.toHex(color)` | Hex ↔ `{ r, g, b, a }` |
+| `await h.describe(node)` | Full details, as in `get_selection` |
+| `await h.variable(name, collection?)` | A `Variable` by name (local, or imported from an enabled library) |
+| `await h.bind(node, field, name)` | Binds a variable, e.g. `h.bind(card, 'fill', 'color/surface')` |
+| `await h.update(node, changes)` | Applies the same changes as one `update_nodes` item |
+| `await h.link(node, target, opts?)` | Prototype link (`'back'`, a node or id; `{ transition, duration }`) |
+| `await h.component(nameOrKey, variant?)` | A component to instantiate (local name or `key:…`) |
 
 Return values are converted to JSON:
 
@@ -302,7 +371,23 @@ A quick way to create layers without writing code. Each item:
 }
 ```
 
-`build` returns the root ids and how many layers it created. New frames are transparent unless you give them a `fill`.
+Using the design system:
+
+```jsonc
+{
+  "type": "FRAME", "name": "Reward", "size": [390, 844],
+  "fill": "{color/bg/surface}",                    // '{name}' binds a variable (local or library)
+  "layout": { "mode": "VERTICAL", "gap": "{space/4}", "padding": 16, "w": 390, "h": 844 },
+  "modes": { "Theme": "Dark" },                    // variable mode for this frame
+  "children": [
+    { "component": "Button", "variant": "Size=L, State=Default", "properties": { "Label": "Claim" }, "link": "Done" },
+    { "component": "key:5f1c…", "name": "Card" },  // a library component by key
+    { "type": "TEXT", "text": "Daily bonus", "textStyle": "Heading/M", "color": "{color/text/primary}" }
+  ]
+}
+```
+
+`build` returns the root ids and how many layers it created. New frames are transparent unless you give them a `fill`. `link` can name another layer created in the same call.
 
 ---
 
@@ -366,7 +451,15 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 - The first copy to bind the port becomes the **hub** and talks to the plugin.
 - Later copies see the port is taken, check that it's a compatible bridge (via `GET /`), and connect to `/relay` as **relays**. Their tool calls are forwarded through the hub.
 - If the hub exits, a relay takes over the port within a few seconds, and the plugin reconnects by itself.
-- If an **older** bridge (1.0.x) is holding the port, newer copies report it instead of fighting over the port.
+- If an **older** bridge (1.0.x) is holding the port, newer copies report it instead of fighting over the port. A 1.1 hub still works with 1.2 relays and plugins for one file; calls that name another file are refused until Claude is restarted, and `status` says so.
+
+**Several Figma files.** The hub keeps one connection per file that has the plugin open. A call goes to the file named in `file`, otherwise to the file with the most recent user activity. The plugin reports activity (selection, edits, page changes, scrolling and zooming, bringing the tab to the front) but never Claude's own changes. When different files are open, changing tools refuse to guess and ask for `file`.
+
+**What the plugin keeps track of.** While it is open, the plugin keeps the last 300 events in memory: selections, page changes, edits/creates/deletes on the current page (`PageNode` `nodechange`), style changes and viewport moves, each tagged as yours, a collaborator's or Claude's. Nothing is stored in the file or sent anywhere unless Claude asks with `get_context`.
+
+**Screenshots of your screen.** To render exactly what's in view, the plugin puts a temporary rectangle (filled with the canvas colour) under everything on the page at the viewport bounds, exports it with `contentsOnly: false` (which draws every overlapping layer), and removes it right away.
+
+**Undo.** The plugin calls `figma.commitUndo()` after each changing command, so every Claude action is a separate Cmd+Z step.
 
 ---
 
@@ -381,6 +474,11 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 | "Import plugin from manifest" is missing | You're in the browser. Use the Figma **desktop app**. |
 | Claude says *"could not open port 3055"* or *"port 3055 is used by another program"* | Something else is using the port. Pick another port (see [Using a different port](#using-a-different-port-optional)). |
 | Claude says an *"older bridge"* is running | A 1.0.x copy is still running, often one started by hand in a Terminal window. Close that window or press Ctrl+C there, then try again. |
+| `status` notes: *"another Claude window started an older bridge"* | You updated the files but an old copy still owns the port. Quit Claude completely (Cmd+Q) and open it again. |
+| Claude says the plugin *"is an older version and doesn't know …"* | Figma is still running the old plugin code. Close the Claude Bridge window in Figma and run it again. |
+| *"Reading team libraries needs the teamlibrary permission"* | Same: re-run the plugin so Figma loads the updated `manifest.json`. |
+| *"macOS did not let Claude access …"* (images or exports) | Allow Claude in System Settings → Privacy & Security → Files and Folders, or use a folder directly in your home folder. |
+| A rectangle named *"Claude capture (temporary)"* stays on the page | A screen capture was interrupted. Delete it; the plugin also removes leftovers when it starts. |
 | `run_code` times out | Split the work or use the background-job pattern in [Writing good `run_code`](#writing-good-run_code). Also check that Figma isn't showing a modal dialog. |
 | Text errors like *"unloaded font"* | Load the exact font family and style first. Use `figma.listAvailableFontsAsync()` to see what's installed. |
 | Tools don't show up in Claude | Claude desktop: check **Settings → Developer** for errors from `figma-bridge`. Claude Code: run `claude mcp list` and `/mcp`. Test the server by hand: `node server/index.js` (Ctrl+C to stop). |
@@ -399,8 +497,11 @@ Logs go to stderr with the `[figma-bridge]` prefix. stdout is reserved for MCP. 
 ## Security
 
 - The server binds only to `127.0.0.1` and `::1`. It is not reachable from your network.
+- Web pages can't use it either: browsers always send an `Origin` header with WebSockets, and the server only accepts the plugin window (origin `null` or `figma.com`) and other copies of itself (no origin).
 - The plugin's manifest allows network access only to `localhost:3055` (`devAllowedDomains`). It can't reach the internet.
 - `run_code` lets Claude run **any** Plugin API code in the open file: read, change or delete layers. Use the bridge on files you're comfortable letting Claude edit, keep version history, and close the plugin when you're done.
+- `place_image` reads the image file or link Claude is given, and `export_nodes` writes files into the folder Claude is given. Both run with your user's permissions on your computer, only when Claude calls them.
+- The activity log lives in the plugin's memory and disappears when you close the plugin.
 - Any program on your own computer that can reach `localhost:3055` could also send commands while the plugin is open. Close the plugin when you're not using it.
 
 ---
@@ -422,15 +523,15 @@ Logs go to stderr with the `[figma-bridge]` prefix. stdout is reserved for MCP. 
 claude-to-figma/
 ├── server/index.js          MCP server + WebSocket hub/relay (zero dependencies)
 ├── figma-plugin/
-│   ├── manifest.json        Plugin manifest (dynamic-page, localhost-only network access)
-│   ├── code.js              Main thread: runs commands with the Plugin API
+│   ├── manifest.json        Plugin manifest (dynamic-page, teamlibrary, localhost-only network access)
+│   ├── code.js              Main thread: runs commands with the Plugin API, keeps the activity log
 │   └── ui.html              Plugin window: WebSocket client + status and log
 ├── install-mac.sh           macOS installer for Claude desktop
 ├── test/
-│   ├── plugin.test.js       code.js handlers against a strict mock Figma API
-│   ├── server.test.js       MCP protocol, big payloads, concurrency, disconnects
-│   ├── multi.test.js        hub + relays, failover, old-version detection
-│   └── ui-e2e.py            Full chain through ui.html in real Chromium (Playwright)
+│   ├── plugin.test.js       code.js handlers against a strict mock Figma API (variables, libraries, viewport, activity…)
+│   ├── server.test.js       MCP tools and prompts, several files, big payloads, local images and exports
+│   ├── multi.test.js        hub + relays, failover, two files through relays, old-version detection
+│   └── ui-e2e.py            Full chain through ui.html in real Chromium (Playwright), two plugin windows
 └── package.json
 ```
 
@@ -447,7 +548,10 @@ The tests use ports 3997–3999, so they don't touch a bridge running on 3055.
 
 ```jsonc
 // plugin → server, on connect
-{ "type": "hello", "info": { "file": "…", "page": "…", "editorType": "figma" } }
+{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.2.0", "session": "…" } }
+// plugin → server, while open
+{ "type": "info", "info": { "page": "…" } }          // page changed
+{ "type": "activity", "what": "select" }               // the user did something here (at most once a second)
 // server → plugin
 { "id": 7, "command": "run_code", "params": { "code": "return 1" } }
 // plugin → server
@@ -455,12 +559,12 @@ The tests use ports 3997–3999, so they don't touch a bridge running on 3055.
 { "type": "result", "id": 7, "ok": false, "error": "message" }
 ```
 
-Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, command, params, timeout }` or `{ type: "status", id }`. They receive `{ type: "reply", id, ok, result | error }`.
+Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, command, params, timeout, target?, write? }` or `{ type: "status", id }`. They receive `{ type: "reply", id, ok, result | error, file?, files? }`.
 
 **Adding a command:**
 
-1. Add a handler to `handlers` in `figma-plugin/code.js`.
-2. Add a tool to `TOOLS` in `server/index.js` that calls `callPlugin("<command>", params)`.
+1. Add a handler to `handlers` in `figma-plugin/code.js` (and to `MUTATING` if it changes the file, so it becomes one undo step).
+2. Add a tool to `TOOLS` in `server/index.js` that calls `callPlugin("<command>", params, timeout, a.file, write)`.
 3. Add a test in `test/plugin.test.js`.
 
 **Releasing:** bump `VERSION` in `server/index.js` and `version` in `package.json` together. Relays use the hub's version string to detect old bridges.

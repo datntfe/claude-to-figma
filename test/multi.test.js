@@ -17,13 +17,14 @@ function startServer(name) {
   const tool = async (n, a) => (await rpc("tools/call", { name: n, arguments: a || {} })).result;
   return { p, rpc, tool, kill: () => p.stdin.end() };
 }
-function fakePlugin(tag) {
+function fakePlugin(tag, file) {
   let ws, stop = false;
+  const name = file || "Demo file";
   const connect = () => {
     if (stop) return;
     ws = new WebSocket("ws://localhost:" + PORT);
-    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: "Demo file", page: "Page 1", editorType: "figma" } }));
-    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: "Demo file", page: "Page 1", editorType: "figma", selection: 0 } : { by: tag, cmd: m.command, code: m.params.code } })); };
+    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.2.0", session: tag } }));
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.2.0" } : { by: tag, cmd: m.command, code: m.params.code } })); };
     let retried = false;
     const again = () => { if (!retried) { retried = true; setTimeout(connect, 300); } };
     ws.onclose = again;
@@ -60,7 +61,22 @@ function fakePlugin(tag) {
   assert.ok(/connected": true/.test(sb) && /connected": true/.test(sc));
   r = await C.tool("run_code", { code: "return 'after failover'" });
   assert.ok(r.content[0].text.includes("after failover")); console.log("failover OK");
-  plug.stop(); B.kill(); C.kill(); await sleep(500);
+
+  // a second Figma file: both stay connected (no fighting over the hub), relays pass the file through
+  const lib = fakePlugin("library", "Library file"); await sleep(800);
+  r = await B.tool("status");
+  assert.equal(JSON.parse(r.content[0].text).files.length, 2, r.content[0].text);
+  r = await B.tool("run_code", { code: "return 'which file?'" });
+  assert.ok(r.isError && /several Figma files/.test(r.content[0].text), r.content[0].text);
+  r = await B.tool("run_code", { code: "return 'to the library'", file: "library" });
+  assert.ok(/"by": "library"/.test(r.content[0].text) && /\[Figma file: Library file\]/.test(r.content[0].text), r.content[0].text);
+  r = await C.tool("get_tree", { file: "Demo" });
+  assert.ok(/"by": "plugin"/.test(r.content[0].text));
+  await sleep(2500);
+  r = await B.tool("status");
+  assert.equal(JSON.parse(r.content[0].text).files.length, 2, "still two files a few seconds later");
+  console.log("two files through relays OK");
+  lib.stop(); plug.stop(); B.kill(); C.kill(); await sleep(500);
 
   // an old 1.0.0 bridge holds the port
   const old = http.createServer((q, s) => { s.end("Claude Figma bridge 1.0.0 is running. Plugin connected: yes\n"); });

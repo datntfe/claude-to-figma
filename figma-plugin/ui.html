@@ -41,13 +41,15 @@
     logEl.scrollTop = logEl.scrollHeight;
   }
   function port() { return parseInt(document.getElementById("port").value, 10) || 3055; }
-  function schedule() { clearTimeout(retry); retry = setTimeout(connect, 2000); }
+  var openedAt = 0, quickDrops = 0;   // an older (1.1) bridge drops the previous file whenever another file connects
+  function schedule(ms) { clearTimeout(retry); retry = setTimeout(connect, ms || 2000); }
   function connect() {
     clearTimeout(retry);
     try { if (ws) { ws.onclose = null; ws.close(); } } catch (e) {}
     try { ws = new WebSocket("ws://localhost:" + port()); }
     catch (e) { setStatus("off", "Can't open a connection: " + e.message); schedule(); return; }
     ws.onopen = function () {
+      openedAt = Date.now();
       setStatus("on", "Connected. Claude can now work in this file. Keep this window open.");
       addLog("connected");
       parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
@@ -61,18 +63,33 @@
       parent.postMessage({ pluginMessage: { type: "command", id: msg.id, command: msg.command, params: msg.params } }, "*");
     };
     ws.onclose = function () {
-      setStatus("off", "Not connected. Make sure Claude is open (it starts the bridge), then wait or press Reconnect.");
-      schedule();
+      quickDrops = openedAt && Date.now() - openedAt < 5000 ? quickDrops + 1 : 0;
+      openedAt = 0;
+      if (quickDrops >= 2) {
+        setStatus("off", "The connection keeps dropping. If Claude Bridge is open in another file, an older bridge may be running: quit Claude (Cmd+Q) and reopen it. Retrying slowly…");
+        schedule(Math.min(30000, 2000 * Math.pow(2, quickDrops - 1)));
+      } else {
+        setStatus("off", "Not connected. Make sure Claude is open (it starts the bridge), then wait or press Reconnect.");
+        schedule();
+      }
     };
     ws.onerror = function () { /* onclose follows */ };
   }
+  // Messages from the plugin's main thread that go to the bridge server:
+  // results, hello (who we are), info (page changed), activity (the user did something here).
+  var FORWARD = { result: 1, hello: 1, info: 1, activity: 1 };
   window.onmessage = function (ev) {
     var m = ev.data && ev.data.pluginMessage;
-    if (!m || (m.type !== "result" && m.type !== "hello")) return;
+    if (!m || !FORWARD[m.type]) return;
     if (m.type === "result" && !m.ok) addLog("  error: " + String(m.error).slice(0, 120));
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify(m));
+    if (m.type === "hello" && m.info && m.info.file) setStatus("on", "Connected: Claude can work in “" + m.info.file + "”. Keep this window open.");
+    send(m);
   };
-  document.getElementById("reconnect").onclick = function () { addLog("reconnecting…"); connect(); };
+  function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+  // Bringing this file's tab to the front counts as activity, so Claude knows which file you are in.
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") send({ type: "activity", what: "focus" }); });
+  window.addEventListener("focus", function () { send({ type: "activity", what: "focus" }); });
+  document.getElementById("reconnect").onclick = function () { addLog("reconnecting…"); quickDrops = 0; connect(); };
   connect();
 </script>
 </body>

@@ -16,7 +16,7 @@ if [ "$SRC" != "$DEST" ]; then
   mkdir -p "$DEST"
   cp -R "$SRC/server" "$SRC/figma-plugin" "$DEST/"
   cp "$SRC/install-mac.sh" "$DEST/" 2>/dev/null || true
-  for f in README.md README.vi.md; do [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DEST/"; done
+  for f in README.md README.vi.md HUONG-DAN.md CHANGELOG.md package.json; do [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DEST/"; done
 fi
 echo "Bridge copied to: $DEST"
 

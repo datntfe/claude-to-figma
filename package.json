@@ -1,8 +1,8 @@
 {
   "name": "claude-to-figma",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Let Claude draw, edit and screenshot directly in your open Figma file: a zero-dependency MCP server plus a Figma development plugin, connected over localhost.",
+  "description": "Let Claude see what you are working on in Figma and draw, edit, tidy, manage variables, styles and libraries, and screenshot directly in your open files: a zero-dependency MCP server plus a Figma development plugin, connected over localhost.",
   "keywords": ["claude", "figma", "mcp", "model-context-protocol", "figma-plugin"],
   "bin": {
     "claude-figma-bridge": "server/index.js"
