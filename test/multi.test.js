@@ -23,8 +23,8 @@ function fakePlugin(tag, file) {
   const connect = () => {
     if (stop) return;
     ws = new WebSocket("ws://localhost:" + PORT);
-    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.3.0", session: tag } }));
-    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.3.0" } : { by: tag, cmd: m.command, code: m.params.code } })); };
+    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.4.0", session: tag } }));
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.4.0" } : { by: tag, cmd: m.command, code: m.params.code, len: (m.params.code || "").length } })); };
     let retried = false;
     const again = () => { if (!retried) { retried = true; setTimeout(connect, 300); } };
     ws.onclose = again;
@@ -50,7 +50,10 @@ function fakePlugin(tag, file) {
   assert.ok(r.content[0].text.includes("from A")); console.log("A (hub) direct OK");
   const big = "// " + "y".repeat(200000);
   r = await B.tool("run_code", { code: big });
-  assert.ok(r.content[0].text.length > 200000); console.log("large payload through relay OK");
+  assert.ok(new RegExp('"len":' + big.length).test(r.content[0].text), "200 KB reach the plugin through the relay");
+  r = await B.tool("run_code", { code: "// " + "z".repeat(30000) });
+  assert.ok(r.content[0].text.length > 30000 && !/Shortened/.test(r.content[0].text), "30 KB results come back whole");
+  console.log("large payload through relay OK");
 
   // hub A goes away → B or C takes over, plugin reconnects
   A.kill(); await sleep(3500);
@@ -69,9 +72,9 @@ function fakePlugin(tag, file) {
   r = await B.tool("run_code", { code: "return 'which file?'" });
   assert.ok(r.isError && /several Figma files/.test(r.content[0].text), r.content[0].text);
   r = await B.tool("run_code", { code: "return 'to the library'", file: "library" });
-  assert.ok(/"by": "library"/.test(r.content[0].text) && /\[Figma file: Library file\]/.test(r.content[0].text), r.content[0].text);
+  assert.ok(/"by": ?"library"/.test(r.content[0].text) && /\[Figma file: Library file\]/.test(r.content[0].text), r.content[0].text);
   r = await C.tool("get_tree", { file: "Demo" });
-  assert.ok(/"by": "plugin"/.test(r.content[0].text));
+  assert.ok(/"by": ?"plugin"/.test(r.content[0].text));
   await sleep(2500);
   r = await B.tool("status");
   assert.equal(JSON.parse(r.content[0].text).files.length, 2, "still two files a few seconds later");

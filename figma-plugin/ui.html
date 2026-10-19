@@ -4,42 +4,135 @@
 <meta charset="utf-8">
 <style>
   :root { color-scheme: light dark; }
-  body { margin: 0; padding: 14px; font: 12px/1.45 Inter, system-ui, -apple-system, sans-serif;
-         background: var(--figma-color-bg, #fff); color: var(--figma-color-text, #222); }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; flex-direction: column; font: 12px/1.45 Inter, system-ui, -apple-system, sans-serif;
+         background: var(--figma-color-bg, #fff); color: var(--figma-color-text, #222); overflow: hidden; }
+  .top { padding: 12px 12px 8px; border-bottom: 1px solid var(--figma-color-border, #e6e6e6); }
   .row { display: flex; align-items: center; gap: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #d97706; flex: none; }
   .dot.on { background: #16a34a; }
   .dot.off { background: #dc2626; }
-  h1 { font-size: 13px; margin: 0; font-weight: 600; }
-  #status { margin: 6px 0 10px; color: var(--figma-color-text-secondary, #666); }
-  #log { height: 92px; overflow: auto; border-radius: 6px; padding: 6px 8px; font: 11px/1.5 ui-monospace, Menlo, monospace;
-         background: var(--figma-color-bg-secondary, #f5f5f5); color: var(--figma-color-text-secondary, #555); }
-  .foot { margin-top: 8px; justify-content: space-between; color: var(--figma-color-text-tertiary, #999); }
-  input { width: 52px; font: inherit; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc);
-          background: transparent; color: inherit; }
-  button { font: inherit; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc);
+  h1 { font-size: 13px; margin: 0; font-weight: 600; flex: 1; }
+  #status { margin: 6px 0 8px; color: var(--figma-color-text-secondary, #666); }
+  #status.paused { color: var(--figma-color-text-warning, #b45309); }
+  label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; color: var(--figma-color-text-secondary, #555); }
+  label input { margin: 0; }
+  .tools { justify-content: space-between; }
+  button { font: inherit; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--figma-color-border, #ccc);
            background: transparent; color: inherit; cursor: pointer; }
+  button:hover { background: var(--figma-color-bg-hover, #f2f2f2); }
+  #log { flex: 1; overflow: auto; padding: 4px 6px; }
+  .empty { color: var(--figma-color-text-tertiary, #999); padding: 18px 8px; text-align: center; }
+  .item { border-radius: 6px; padding: 6px 6px 6px 8px; cursor: pointer; }
+  .item:hover { background: var(--figma-color-bg-secondary, #f5f5f5); }
+  .item.read { opacity: .62; }
+  .line { display: flex; align-items: center; gap: 7px; }
+  .st { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #9ca3af; }
+  .pending .st { background: #d97706; animation: pulse 1s infinite; }
+  .ok .st { background: #16a34a; }
+  .fail .st { background: #dc2626; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fail .sum { color: var(--figma-color-text-danger, #b91c1c); }
+  .sub { display: flex; align-items: center; gap: 6px; margin: 1px 0 0 15px; }
+  .meta { color: var(--figma-color-text-tertiary, #999); font-size: 11px; white-space: nowrap; }
+  .undo { font-size: 10.5px; padding: 0 5px; border-radius: 4px; background: var(--figma-color-bg-secondary, #f0f0f0); color: var(--figma-color-text-secondary, #666); white-space: nowrap; }
+  .show { padding: 1px 7px; font-size: 11px; }
+  .detail { display: none; margin: 6px 0 2px 15px; padding: 6px 8px; border-radius: 5px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+            font: 10.5px/1.45 ui-monospace, Menlo, monospace; background: var(--figma-color-bg-secondary, #f5f5f5); color: var(--figma-color-text-secondary, #555); }
+  .item.open .detail { display: block; }
+  .foot { padding: 7px 12px 9px; border-top: 1px solid var(--figma-color-border, #e6e6e6); justify-content: space-between; flex-wrap: wrap; row-gap: 6px; color: var(--figma-color-text-tertiary, #999); }
+  .foot button, .foot span { white-space: nowrap; }
+  .foot input { width: 46px; font: inherit; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc); background: transparent; color: inherit; }
+  #grip { position: fixed; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize;
+          background: linear-gradient(135deg, transparent 50%, var(--figma-color-border-strong, #bbb) 50%, transparent 58%, transparent 68%, var(--figma-color-border-strong, #bbb) 68%, transparent 76%); }
 </style>
 </head>
 <body>
-  <div class="row"><div id="dot" class="dot"></div><h1>Claude Bridge</h1></div>
-  <div id="status">Connecting to the bridge on this computer…</div>
-  <div id="log"></div>
-  <div class="row foot">
-    <span>Port <input id="port" value="3055"></span>
-    <button id="reconnect">Reconnect</button>
+  <div class="top">
+    <div class="row"><div id="dot" class="dot"></div><h1>Claude Bridge</h1>
+      <label title="When off, Claude can still look at this file but can't change it."><input type="checkbox" id="allow" checked> Allow changes</label></div>
+    <div id="status">Connecting to the bridge on this computer…</div>
+    <div class="row tools">
+      <label><input type="checkbox" id="onlyChanges"> Changes only</label>
+      <button id="saveVersion" title="Save a restore point in the file's version history">Save version</button>
+    </div>
   </div>
+  <div id="log"><div class="empty" id="empty">What Claude does in this file shows up here. Each change is one Cmd+Z.</div></div>
+  <div class="row foot">
+    <span id="counts">0 calls</span>
+    <span class="row"><button id="copy" title="Copy the timeline as text">Copy</button><input id="port" value="3055" title="Port"><button id="reconnect">Reconnect</button></span>
+  </div>
+  <div id="grip" title="Drag to resize"></div>
 <script>
-  var ws = null, retry = null, count = 0;
+  var ws = null, retry = null, calls = 0, failed = 0, rows = {}, order = [], outbox = [], lastHello = null;
+  var WRITES = { run_code: 1, build: 1, delete_nodes: 1, set_variables: 1, bind_variables: 1, set_styles: 1, import_from_library: 1, update_nodes: 1, place_image: 1 };
+  var LABELS = { build: "Building", update_nodes: "Changing layers", delete_nodes: "Deleting layers", run_code: "Running code", set_variables: "Changing variables",
+    bind_variables: "Binding variables", set_styles: "Changing styles", import_from_library: "Importing from a library", place_image: "Placing an image",
+    audit_design: "Checking the design", get_spec: "Reading the design", get_selection: "Reading the selection", get_context: "Looking at your screen",
+    screenshot: "Taking a screenshot", find_nodes: "Searching layers", export_nodes: "Exporting", get_tree: "Reading layers", get_variables: "Reading variables",
+    get_library: "Reading the library", focus: "Showing layers", set_page: "Switching page", list_pages: "Listing pages", ping: "Checking the connection" };
   var dot = document.getElementById("dot"), statusEl = document.getElementById("status"), logEl = document.getElementById("log");
-  function setStatus(state, text) { dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : ""); statusEl.textContent = text; }
-  function addLog(t) {
-    var line = document.createElement("div");
-    line.textContent = new Date().toLocaleTimeString() + "  " + t;
-    logEl.appendChild(line);
-    while (logEl.childNodes.length > 60) logEl.removeChild(logEl.firstChild);
+  var allowEl = document.getElementById("allow"), onlyEl = document.getElementById("onlyChanges");
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+  function toMain(m) { parent.postMessage({ pluginMessage: m }, "*"); }
+  function setStatus(state, text) { dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : ""); statusEl.textContent = text; statusEl.className = ""; }
+  function connectedText() {
+    if (!allowEl.checked) { statusEl.className = "paused"; return "Changes paused: Claude can look at this file but not change it."; }
+    return lastHello && lastHello.file ? "Connected: Claude can work in “" + lastHello.file + "”. Keep this window open." : "Connected. Claude can now work in this file. Keep this window open.";
+  }
+  function time(t) { var d = new Date(t); return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
+  function counts() { document.getElementById("counts").textContent = calls + (calls === 1 ? " call" : " calls") + (failed ? " · " + failed + " failed" : ""); }
+  function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
+  function isWrite(c, p) { return !!WRITES[c] || (c === "set_page" && p && p.create) || (c === "audit_design" && p && p.fix && p.fix.length); }
+  function filter() { for (var i = 0; i < order.length; i++) { var r = rows[order[i]]; r.el.style.display = onlyEl.checked && !r.write ? "none" : ""; } }
+
+  /* one row per command: pending → done, with what changed and a Show button */
+  function addRow(msg) {
+    calls++; counts();
+    var empty = document.getElementById("empty"); if (empty) empty.remove();
+    var write = isWrite(msg.command, msg.params);
+    var r = { id: msg.id, command: msg.command, write: write, started: Date.now(), params: msg.params };
+    r.el = el("div", "item pending" + (write ? " write" : " read"));
+    var line = el("div", "line");
+    line.appendChild(el("span", "st"));
+    r.sum = line.appendChild(el("span", "sum", (LABELS[msg.command] || msg.command) + "…"));
+    r.line = line;
+    r.el.appendChild(line);
+    var sub = el("div", "sub");
+    if (write) sub.appendChild(el("span", "undo", "↶ 1 undo"));
+    r.meta = sub.appendChild(el("span", "meta", time(r.started)));
+    r.el.appendChild(sub);
+    r.detail = r.el.appendChild(el("div", "detail", "request: " + clip(JSON.stringify(msg.params || {}), 2000)));
+    r.el.onclick = function (e) { if (e.target.tagName !== "BUTTON") r.el.classList.toggle("open"); };
+    logEl.appendChild(r.el);
+    rows[msg.id] = r; order.push(msg.id);
+    while (order.length > 80) { var old = rows[order.shift()]; if (old) { old.el.remove(); delete rows[old.id]; } }
+    filter();
     logEl.scrollTop = logEl.scrollHeight;
   }
+  function finishRow(m) {
+    var r = rows[m.rid !== undefined ? m.rid : m.id];
+    if (!r) return;
+    if (m.type === "result") {   // arrives first; "done" adds the summary
+      r.el.className = "item " + (m.ok ? "ok" : "fail") + (r.write ? " write" : " read") + (r.el.classList.contains("open") ? " open" : "");
+      if (!m.ok) { failed++; counts(); r.sum.textContent = "Failed: " + clip(m.error, 120); r.detail.textContent += "\n\nerror: " + m.error; }
+      return;
+    }
+    r.sum.textContent = m.summary || r.sum.textContent;
+    r.sum.title = m.summary || "";
+    r.meta.textContent = (m.ms >= 1000 ? (m.ms / 1000).toFixed(1) + "s" : m.ms + "ms") + " · " + time(r.started);
+    if (m.ok && m.preview) r.detail.textContent += "\n\nresult: " + m.preview;
+    if (m.touched && m.touched.length) {
+      var b = el("button", "show", "Show");
+      b.title = "Select and zoom to the " + m.touched.length + " layer(s)";
+      b.onclick = function () { toMain({ type: "ui-focus", ids: m.touched }); };
+      r.line.appendChild(b);
+    }
+    filter();
+  }
+
   function port() { return parseInt(document.getElementById("port").value, 10) || 3055; }
   var openedAt = 0, quickDrops = 0;   // an older (1.1) bridge drops the previous file whenever another file connects
   function schedule(ms) { clearTimeout(retry); retry = setTimeout(connect, ms || 2000); }
@@ -50,17 +143,15 @@
     catch (e) { setStatus("off", "Can't open a connection: " + e.message); schedule(); return; }
     ws.onopen = function () {
       openedAt = Date.now();
-      setStatus("on", "Connected. Claude can now work in this file. Keep this window open.");
-      addLog("connected");
-      parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
+      setStatus("on", connectedText());
+      toMain({ type: "ui-ready" });
     };
     ws.onmessage = function (ev) {
       var msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (!msg || !msg.command) return;
-      count++;
-      addLog("#" + count + " " + msg.command);
-      parent.postMessage({ pluginMessage: { type: "command", id: msg.id, command: msg.command, params: msg.params } }, "*");
+      if (msg.command !== "ping") addRow(msg);   // status checks don't clutter the timeline
+      toMain({ type: "command", id: msg.id, command: msg.command, params: msg.params, deadline: msg.deadline });
     };
     ws.onclose = function () {
       quickDrops = openedAt && Date.now() - openedAt < 5000 ? quickDrops + 1 : 0;
@@ -76,20 +167,49 @@
     ws.onerror = function () { /* onclose follows */ };
   }
   // Messages from the plugin's main thread that go to the bridge server:
-  // results, hello (who we are), info (page changed), activity (the user did something here).
+  // results, hello (who we are), info (page changed, paused), activity (the user did something here).
+  // "done" and "saved" are for this window only.
   var FORWARD = { result: 1, hello: 1, info: 1, activity: 1 };
   window.onmessage = function (ev) {
     var m = ev.data && ev.data.pluginMessage;
-    if (!m || !FORWARD[m.type]) return;
-    if (m.type === "result" && !m.ok) addLog("  error: " + String(m.error).slice(0, 120));
-    if (m.type === "hello" && m.info && m.info.file) setStatus("on", "Connected: Claude can work in “" + m.info.file + "”. Keep this window open.");
+    if (!m) return;
+    if (m.type === "done" || m.type === "result") finishRow(m);
+    if (m.type === "saved") { statusEl.textContent = m.ok ? "Saved a version: " + m.title : "Couldn't save a version: " + m.error; setTimeout(function () { if (ws && ws.readyState === 1) setStatus("on", connectedText()); }, 4000); }
+    if (!FORWARD[m.type]) return;
+    if (m.type === "hello" && m.info) { lastHello = m.info; setStatus("on", connectedText()); }
     send(m);
+    if (m.type === "hello") flush();
   };
-  function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+  /* a result that finishes while the connection is down is sent once it's back (after hello) */
+  function send(m) {
+    if (ws && ws.readyState === 1) { ws.send(JSON.stringify(m)); return; }
+    if (m.type === "result") { outbox.push(m); if (outbox.length > 50) outbox.shift(); }
+  }
+  function flush() { var q = outbox; outbox = []; for (var i = 0; i < q.length; i++) send(q[i]); }
   // Bringing this file's tab to the front counts as activity, so Claude knows which file you are in.
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") send({ type: "activity", what: "focus" }); });
   window.addEventListener("focus", function () { send({ type: "activity", what: "focus" }); });
-  document.getElementById("reconnect").onclick = function () { addLog("reconnecting…"); quickDrops = 0; connect(); };
+  document.getElementById("reconnect").onclick = function () { quickDrops = 0; connect(); };
+  allowEl.onchange = function () { toMain({ type: "allow", on: allowEl.checked }); if (ws && ws.readyState === 1) setStatus("on", connectedText()); };
+  onlyEl.onchange = filter;
+  document.getElementById("saveVersion").onclick = function () { statusEl.textContent = "Saving a version…"; toMain({ type: "ui-save-version" }); };
+  document.getElementById("copy").onclick = function () {
+    var lines = order.map(function (id) { var r = rows[id]; return time(r.started) + "  " + r.command + "  " + r.sum.textContent + "  " + r.meta.textContent; });
+    var ta = el("textarea"); ta.value = lines.join("\n"); document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  };
+  /* drag the corner to resize; the size is remembered */
+  (function () {
+    var g = document.getElementById("grip"), sx = 0, sy = 0, sw = 0, sh = 0, raf = 0, last = null;
+    function move(e) { last = { w: sw + e.clientX - sx, h: sh + e.clientY - sy }; if (!raf) raf = requestAnimationFrame(function () { raf = 0; toMain({ type: "ui-resize", w: last.w, h: last.h }); }); }
+    function up() { g.removeEventListener("pointermove", move); g.removeEventListener("pointerup", up); if (last) toMain({ type: "ui-resize", w: last.w, h: last.h, save: true }); }
+    g.addEventListener("pointerdown", function (e) {
+      sx = e.clientX; sy = e.clientY; sw = window.innerWidth; sh = window.innerHeight; last = null;
+      try { g.setPointerCapture(e.pointerId); } catch (x) {}
+      g.addEventListener("pointermove", move); g.addEventListener("pointerup", up); e.preventDefault();
+    });
+  })();
   connect();
 </script>
 </body>

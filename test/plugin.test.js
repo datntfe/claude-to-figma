@@ -264,7 +264,10 @@ const figma = {
   _removed: [], _exports: [], _commits: 0, _versions: [], _allPagesLoaded: false,
   get root() { return doc; },
   get currentPage() { return current; },
-  showUI() { }, ui: { postMessage(m) { toUI.push(m); }, set onmessage(f) { uiHandler = f; } },
+  showUI() { }, ui: { postMessage(m) { toUI.push(m); }, set onmessage(f) { uiHandler = f; }, resize(w, h) { figma._size = [w, h]; } },
+  _toasts: [], _store: {},
+  notify(text, opts) { const t = { text, opts, cancelled: false, cancel() { this.cancelled = true; } }; figma._toasts.push(t); return t; },
+  clientStorage: { async getAsync(k) { return figma._store[k]; }, async setAsync(k, v) { figma._store[k] = v; } },
   on(ev, fn) { listeners[ev] = fn; },
   off(ev) { delete listeners[ev]; },
   commitUndo() { figma._commits++; },
@@ -345,7 +348,7 @@ for (const c of [libButtonM, libButtonL]) { c._props = { "Label#1:0": { type: "T
 
 const code = fs.readFileSync(path.join(__dirname, "..", "figma-plugin", "code.js"), "utf8");
 const intervals = [];
-const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: { now: () => clock.t }, setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout };
+const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout };
 sandbox.globalThis = sandbox;
 vm.runInNewContext(code, sandbox);
 let mid = 0;
@@ -361,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.3.0"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.4.0"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.3.0"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.4.0"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -607,7 +610,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.equal(r.libraryComponentsOnThisPage[0].name, "Button"); assert.equal(r.libraryComponentsOnThisPage[0].uses, 1);
   console.log("get_library OK →", JSON.stringify({ styles: Object.keys(r.styles), components: r.components.length, remote: r.libraryComponentsOnThisPage }));
   viewport.center = { x: 1000, y: 1000 }; viewport.zoom = 1;
-  r = ok(await cmd("import_from_library", { kind: "component_set", key: "libset1", variant: "size=l" }));
+  r = ok(await cmd("import_from_library", { kind: "component_set", key: "libset1", variant: "size=l", position: "viewport" }));
   const placed = all.get(r.instance.id);
   assert.equal((await placed.getMainComponentAsync()).name, "Size=L"); assert.equal(placed.x, 920); assert.equal(placed.y, 976);
   r = ok(await cmd("import_from_library", { kind: "variable", key: "libvar1" }));
@@ -737,7 +740,13 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   viewport.center = { x: 1000, y: 1000 };
   r = ok(await cmd("place_image", { base64: png, name: "Hero photo", width: 320 }));
   const hero = all.get(r.node.id);
-  assert.equal(hero.width, 320); assert.equal(hero.height, 240); assert.equal(hero.x, 840); assert.equal(hero.fills[0].type, "IMAGE"); assert.equal(hero.fills[0].scaleMode, "FILL");
+  assert.equal(hero.width, 320); assert.equal(hero.height, 240); assert.equal(hero.fills[0].type, "IMAGE"); assert.equal(hero.fills[0].scaleMode, "FILL");
+  assert.ok(/beside your work/.test(r.placed_at.how), JSON.stringify(r.placed_at));
+  const overlaps = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+  for (const other of current.children) if (other !== hero) assert.ok(!overlaps(hero.absoluteBoundingBox, other.absoluteBoundingBox), "new image overlaps " + other.name);
+  r = ok(await cmd("place_image", { base64: png, name: "Centred", width: 320, position: "viewport" }));
+  assert.equal(all.get(r.node.id).x, 840, "position: viewport keeps the old behaviour");
+  ok(await cmd("delete_nodes", { ids: [r.node.id] }));
   r = ok(await cmd("place_image", { base64: png, node_id: card.id, scale_mode: "fit" }));
   assert.equal(card.fills[0].scaleMode, "FIT");
   r = ok(await cmd("place_image", { svg: "<svg/>", name: "Logo", x: 10, y: 20 }));
@@ -833,6 +842,179 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [icon.id]); assert.equal(r.errors[0].error, "not found");
   console.log("audit rounding/binding care + delete errors OK");
 
+  /* 1.4: changes run one at a time (one undo step each); reads don't wait */
+  {
+    const qa = figma.createText(); qa.name = "Queue A"; const qb = figma.createText(); qb.name = "Queue B";
+    const order = [], realLoad = figma.loadFontAsync, realCommit = figma.commitUndo;
+    figma.loadFontAsync = async (f) => { order.push("font"); await new Promise((res) => setTimeout(res, 15)); fonts.add(f.family + f.style); };
+    figma.commitUndo = () => { order.push("commit"); figma._commits++; };
+    toUI.length = 0;
+    await Promise.all([
+      uiHandler({ type: "command", id: "q1", command: "update_nodes", params: { items: [{ id: qa.id, text: "One" }] } }),
+      uiHandler({ type: "command", id: "q2", command: "update_nodes", params: { items: [{ id: qb.id, text: "Two" }] } }),
+      uiHandler({ type: "command", id: "r1", command: "get_selection", params: {} })
+    ]);
+    figma.loadFontAsync = realLoad; figma.commitUndo = realCommit;
+    assert.deepEqual(order.filter((x, i) => i === 0 || x !== order[i - 1]), ["font", "commit", "font", "commit"], "the second change starts after the first one's undo step: " + order.join(","));
+    const at = (id) => toUI.findIndex((m) => m.type === "result" && m.id === id);
+    assert.ok(at("r1") >= 0 && at("r1") < at("q2"), "a read is not held up by queued changes");
+    assert.equal(qa.characters, "One"); assert.equal(qb.characters, "Two");
+    // a queued change Claude has stopped waiting for is not applied
+    let r = await cmd("update_nodes", { items: [{ id: qa.id, name: "Late" }] });
+    toUI.length = 0;
+    await uiHandler({ type: "command", id: "q3", command: "update_nodes", deadline: clock.t - 1, params: { items: [{ id: qa.id, name: "Too late" }] } });
+    r = toUI.find((m) => m.id === "q3");
+    assert.ok(!r.ok && /Not applied/.test(r.error) && qa.name === "Late", "expired change skipped");
+    // the Allow changes switch
+    await uiHandler({ type: "allow", on: false });
+    assert.ok(toUI.find((m) => m.type === "info" && m.info.paused === true), "paused state reaches the bridge");
+    r = await cmd("update_nodes", { items: [{ id: qa.id, name: "Blocked" }] });
+    assert.ok(!r.ok && /paused/.test(r.error) && qa.name === "Late");
+    assert.equal(ok(await cmd("ping")).paused, true);
+    ok(await cmd("get_selection", {}));
+    r = await cmd("audit_design", { node_id: qa.id, checks: ["names"] });
+    assert.ok(r.ok, "a check without fixes is a read");
+    await uiHandler({ type: "allow", on: true });
+    assert.ok(!ok(await cmd("ping")).paused);
+    ok(await cmd("delete_nodes", { ids: [qa.id, qb.id] }));
+    console.log("one change at a time, deadline, pause OK");
+  }
+
+  /* 1.4: the panel's timeline, toasts, Show, resize, save version */
+  {
+    const toasts0 = figma._toasts.length;
+    let r = ok(await cmd("build", { spec: { type: "RECTANGLE", name: "Toast box", size: [40, 40], effects: [{ type: "DROP_SHADOW", color: "#00000033", y: 4, blur: 12 }] } }));
+    const box = all.get(r.roots[0].id);
+    assert.equal(box.effects[0].showShadowBehindNode, false, "shadows don't show through translucent fills");
+    const done = toUI.find((m) => m.type === "done");
+    assert.ok(done && done.write && done.ok && /Created 1 layer/.test(done.summary) && done.touched[0] === box.id, JSON.stringify(done));
+    assert.equal(figma._toasts.length, toasts0 + 1); const toast = figma._toasts[figma._toasts.length - 1];
+    assert.ok(/Claude: Created 1 layer · Cmd\+Z to undo/.test(toast.text) && toast.opts.button.text === "Show");
+    current.selection = []; viewport.zoom = 9;
+    toast.opts.button.action(); await new Promise((res) => setTimeout(res, 5));
+    assert.deepEqual(current.selection.map((n) => n.id), [box.id]); assert.equal(viewport.zoom, 4, "Show zooms in no further than 400%");
+    ok(await cmd("get_selection", {}));
+    assert.equal(figma._toasts.length, toasts0 + 1, "reads don't toast");
+    const rd = toUI.find((m) => m.type === "done");
+    assert.ok(!rd.write && /Read the selection/.test(rd.summary));
+    current.selection = [];
+    await uiHandler({ type: "ui-focus", ids: [box.id] }); await new Promise((res) => setTimeout(res, 5));
+    assert.equal(current.selection[0].id, box.id);
+    await uiHandler({ type: "ui-resize", w: 5000, h: 100, save: true }); await new Promise((res) => setTimeout(res, 5));
+    assert.deepEqual(figma._size, [900, 220]); assert.deepEqual(figma._store.panelSize, { w: 900, h: 220 });
+    const v0 = figma._versions.length;
+    await uiHandler({ type: "ui-save-version" }); await new Promise((res) => setTimeout(res, 5));
+    assert.ok(/^Before Claude · \d\d:\d\d$/.test(figma._versions[v0]));
+    r = await cmd("get_tree", { node_id: "999:999" });
+    assert.ok(!r.ok && /may have been deleted/.test(r.error));
+    ok(await cmd("delete_nodes", { ids: [box.id] }));
+    console.log("panel timeline, toast + Show, resize, save version OK");
+  }
+
+  /* 1.4: new work lands beside the user's work, overlapping nothing */
+  {
+    const anchor = figma.createFrame(); anchor.name = "Current screen"; anchor.x = 5000; anchor.y = 300; anchor.resize(375, 812);
+    const blocker = figma.createFrame(); blocker.name = "Next screen"; blocker.x = 5455; blocker.y = 300; blocker.resize(375, 812);
+    current.selection = [anchor];
+    const r1 = ok(await cmd("build", { spec: { type: "FRAME", name: "New A", size: [375, 812] } }));
+    const r2 = ok(await cmd("build", { spec: [{ type: "FRAME", name: "New B", size: [200, 200] }, { type: "FRAME", name: "Pinned", size: [10, 10], x: 1, y: 2 }] }));
+    const a = all.get(r1.roots[0].id), b = all.get(r2.roots[0].id), pinned = all.get(r2.roots[1].id);
+    const overlaps = (p, q) => p.x < q.x + q.width && p.x + p.width > q.x && p.y < q.y + q.height && p.y + p.height > q.y;
+    for (const n of [a, b]) {
+      assert.ok(n.x >= anchor.x + anchor.width && n.y === anchor.y, n.name + " is right of the selection: " + n.x);
+      for (const o of current.children) if (o !== n) assert.ok(!overlaps(n, o), n.name + " overlaps " + o.name);
+    }
+    assert.ok(r1.placed_at && /beside/.test(r1.placed_at.how));
+    assert.equal(pinned.x, 1, "x/y still win");
+    ok(await cmd("delete_nodes", { ids: [anchor.id, blocker.id, a.id, b.id, pinned.id] }));
+    current.selection = [];
+    console.log("new work lands beside yours OK");
+  }
+
+  /* 1.4: lighter reads: capped tree, paging */
+  {
+    const big = figma.createFrame(); big.name = "Big list";
+    for (let i = 0; i < 30; i++) { const k = figma.createRectangle(); k.name = "Kid " + i; big.appendChild(k); }
+    let r = ok(await cmd("get_tree", { node_id: big.id, depth: 2, max_nodes: 10 }));
+    assert.equal(r.children.length, 10); assert.equal(r.more, 20); assert.ok(/max_nodes 10/.test(r.note));
+    r = ok(await cmd("find_nodes", { node_id: big.id, name: "Kid", limit: 5, offset: 5 }));
+    assert.equal(r.nodes.length, 5); assert.equal(r.nodes[0].name, "Kid 5"); assert.equal(r.next_offset, 10); assert.equal(r.count, 30);
+    r = ok(await cmd("get_variables", { limit: 2, offset: 1 }));
+    const names = r.collections.flatMap((c) => c.variables.map((v) => v.name));
+    assert.equal(names.length, 2); assert.equal(r.next_offset, 3);
+    ok(await cmd("delete_nodes", { ids: [big.id] }));
+    console.log("capped tree + paging OK");
+  }
+
+  /* 1.4: get_spec, one deep read for code */
+  {
+    const surf = variables.find((v) => v.name === "bg/surface"), space = variables.find((v) => v.name === "space/md") || variables.find((v) => v.resolvedType === "FLOAT" && !v.remote);
+    const scr = figma.createFrame(); scr.name = "Spec screen"; scr.resize(390, 844);
+    scr.layoutMode = "VERTICAL"; scr.itemSpacing = 16; scr.paddingTop = scr.paddingBottom = 24; scr.paddingLeft = scr.paddingRight = 20; scr.counterAxisAlignItems = "CENTER";
+    scr.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 }, opacity: 1, boundVariables: { color: { type: "VARIABLE_ALIAS", id: surf.id } } }];
+    scr.boundVariables.itemSpacing = { type: "VARIABLE_ALIAS", id: space.id };
+    const hdr = figma.createFrame(); hdr.name = "Header"; hdr.resize(350, 60); scr.appendChild(hdr);
+    hdr.fills = [{ type: "GRADIENT_LINEAR", gradientTransform: [[0, 1, 0], [-1, 0, 1]], gradientStops: [{ position: 0, color: { r: 0.48, g: 0.23, b: 0.93, a: 1 } }, { position: 1, color: { r: 1, g: 0.48, b: 0.35, a: 1 } }], visible: true, opacity: 1 }];
+    hdr.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.1 }]; hdr.strokeWeight = 1; hdr.dashPattern = [4, 2];
+    hdr.effects = [{ type: "DROP_SHADOW", color: { r: 0, g: 0, b: 0, a: 0.15 }, offset: { x: 0, y: 4 }, radius: 12, spread: 0, visible: true }];
+    hdr.cornerRadius = 12;
+    const badge = figma.createRectangle(); badge.name = "Badge"; badge.resize(80, 20); badge.x = 250; badge.y = 20; badge.constraints = { horizontal: "MAX", vertical: "MIN" }; hdr.appendChild(badge);
+    const icon = figma.createFrame(); icon.name = "Icon/Star"; icon.resize(24, 24); const vec = node("VECTOR", { name: "Star", width: 20, height: 20 }); vec.fills = [{ type: "SOLID", color: { r: 1, g: 0.8, b: 0 } }]; icon.appendChild(vec); hdr.appendChild(icon);
+    const tx = figma.createText(); tx.name = "Title"; await figma.loadFontAsync({ family: "Inter", style: "Semi Bold" });
+    tx.fontName = { family: "Inter", style: "Semi Bold" }; tx.fontSize = 20; tx.lineHeight = { unit: "PERCENT", value: 140 }; tx.letterSpacing = { unit: "PERCENT", value: -2 }; tx.characters = "Daily bonus";
+    tx.textAutoResize = "HEIGHT"; tx.fills = [{ type: "SOLID", color: { r: 0.07, g: 0.07, b: 0.07 } }]; tx.textCase = "UPPER"; scr.appendChild(tx);
+    tx.layoutSizingHorizontal = "FILL";
+    const mixedText = figma.createText(); mixedText.name = "Terms"; mixedText._chars = "Read the terms"; mixedText.fontName = MIXED; mixedText.fontSize = 14; scr.appendChild(mixedText);
+    mixedText.getStyledTextSegments = () => [
+      { start: 0, end: 9, characters: "Read the ", fontName: { family: "Inter", style: "Regular" }, fontSize: 14, fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }], textDecoration: "NONE" },
+      { start: 9, end: 14, characters: "terms", fontName: { family: "Inter", style: "Bold" }, fontSize: 14, fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 1 } }], textDecoration: "UNDERLINE", hyperlink: { type: "URL", value: "https://x.test/terms" } }
+    ];
+    const btnMain = node("COMPONENT", { name: "Promo button", key: "promokey", width: 120, height: 40 }); btnMain._props = { "Label#2:0": { type: "TEXT", value: "Play" } }; attachCreateInstance(btnMain);
+    const row = figma.createFrame(); row.name = "Buttons"; row.layoutMode = "HORIZONTAL"; row.layoutWrap = "WRAP"; row.itemSpacing = 8; row.counterAxisSpacing = 8; scr.appendChild(row);
+    const insts = []; for (let i = 0; i < 12; i++) { const it = btnMain.createInstance(); row.appendChild(it); insts.push(it); }
+    const odd = btnMain.createInstance(); odd.componentProperties["Label#2:0"].value = "Claim"; row.appendChild(odd);
+    const hidden = figma.createRectangle(); hidden.name = "Hidden"; hidden.visible = false; scr.appendChild(hidden);
+
+    let r = ok(await cmd("get_spec", { node_id: scr.id }));
+    if (process.env.SHOW_SPEC) console.log(JSON.stringify(r));
+    const root = r.nodes[0];
+    assert.equal(root.type, "frame"); assert.equal(root.bg, "{bg/surface}");
+    assert.deepEqual(root.layout, { dir: "column", gap: "{" + space.name + "}", align: "center", padding: [24, 20] });
+    const h = root.children.find((c) => c.name === "Header");
+    assert.equal(h.bg.type, "linear-gradient"); assert.equal(h.bg.angle, 180, "top-to-bottom gradient is 180deg");
+    assert.deepEqual(h.border, { color: "#0000001A", width: 1, dash: [4, 2] });
+    assert.equal(h.boxShadow, "0px 4px 12px 0px #00000026"); assert.equal(h.radius, 12);
+    const bd = h.children.find((c) => c.name === "Badge");
+    assert.deepEqual(bd.pos, { right: 20, top: 20 }, "free layers get their position from their constraints");
+    const ic = h.children.find((c) => c.name === "Icon/Star");
+    assert.ok(ic.icon && !ic.children, "icons are one layer");
+    const t = root.children.find((c) => c.name === "Title");
+    assert.equal(t.w, "fill"); assert.equal(t.h, "hug");
+    assert.deepEqual(t.text, { content: "Daily bonus", font: "Inter", weight: 600, size: 20, lineHeight: 28, letterSpacing: -0.4, case: "uppercase", color: "#121212" });
+    const m = root.children.find((c) => c.name === "Terms");
+    assert.equal(m.text.runs.length, 2); assert.deepEqual(m.text.runs[1], { from: 9, to: 14, text: "terms", font: "Inter", weight: 700, color: "#0000FF", decoration: "underline", link: "https://x.test/terms" });
+    const rowSpec = root.children.find((c) => c.name === "Buttons");
+    assert.equal(rowSpec.layout.wrap, true);
+    const same = rowSpec.children.filter((c) => c.same);
+    assert.equal(same.length, 11, "12 identical instances are listed once"); assert.equal(same[0].same, rowSpec.children[0].id);
+    const claim = rowSpec.children[12];
+    assert.ok(!claim.same && claim.component.props.Label === "Claim", "a different label is listed in full");
+    assert.equal(r.components["Promo button"].uses, 13);
+    assert.ok(!root.children.find((c) => c.name === "Hidden"), "hidden layers left out");
+    assert.equal(r.tokens["bg/surface"].web, "var(--bg-surface)"); assert.ok(r.tokens["bg/surface"].modes.Light);
+    assert.ok(r.notes.some((n) => /icon/.test(n)) && r.notes.some((n) => /hidden/.test(n)));
+    // too big for one read: a plan of sections to read one by one
+    r = ok(await cmd("get_spec", { node_id: scr.id, max_nodes: 5 }));
+    assert.ok(r.plan && r.plan.length >= 4 && !r.nodes && /too many/.test(r.note));
+    // the selection, when nothing is named
+    current.selection = [hdr];
+    r = ok(await cmd("get_spec", {}));
+    assert.equal(r.nodes[0].name, "Header");
+    current.selection = [];
+    ok(await cmd("delete_nodes", { ids: [scr.id] }));
+    console.log("get_spec OK → " + JSON.stringify(root).length + " chars for " + 21 + " layers");
+  }
+
   /* pages, focus, delete, unknown */
   r = ok(await cmd("set_page", { name: "02 Mobile", create: true }));
   assert.ok(figma.currentPage.name === "02 Mobile");
@@ -848,7 +1030,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.3.0");
+  assert.equal(sandbox.__claudeBridge.version, "1.4.0");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });

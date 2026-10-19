@@ -7,7 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const PORT = Number(process.env.TEST_PORT || 3999);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-home-"));
-const srv = spawn(process.execPath, [path.join(__dirname, "..", "server", "index.js")], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME }) });
+const srv = spawn(process.execPath, [path.join(__dirname, "..", "server", "index.js")], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_HELLO_MS: "400" }) });
 let out = "", stderr = "";
 const waiters = new Map();
 srv.stdout.on("data", (d) => {
@@ -47,12 +47,46 @@ function fakePlugin(info, handler, host) {
   return p;
 }
 const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", selection: 0, version: info.version });
+/* a plugin on a raw socket, so the test can drop it without a close frame */
+function rawPlugin(info, onCommand) {
+  const crypto = require("crypto");
+  return new Promise((resolve) => {
+    const req = require("http").request({ host: "127.0.0.1", port: PORT, path: "/", headers: { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": crypto.randomBytes(16).toString("base64"), Origin: "null" } });
+    req.on("upgrade", (res, sock) => {
+      let buf = Buffer.alloc(0);
+      const frame = (op, pl) => {
+        const mask = crypto.randomBytes(4), body = Buffer.from(pl);
+        for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+        let hdr;
+        if (body.length < 126) hdr = Buffer.from([0x80 | op, 0x80 | body.length]);
+        else { hdr = Buffer.alloc(4); hdr[0] = 0x80 | op; hdr[1] = 0x80 | 126; hdr.writeUInt16BE(body.length, 2); }
+        sock.write(Buffer.concat([hdr, mask, body]));
+      };
+      const send = (o) => frame(1, Buffer.from(JSON.stringify(o)));
+      sock.on("data", (d) => {
+        buf = Buffer.concat([buf, d]);
+        while (buf.length >= 2) {
+          let len = buf[1] & 0x7f, off = 2;
+          if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+          if (buf.length < off + len) break;
+          const op = buf[0] & 0x0f, pl = buf.subarray(off, off + len);
+          buf = buf.subarray(off + len);
+          if (op === 1) onCommand(JSON.parse(pl.toString()), send);
+        }
+      });
+      sock.on("error", () => { });
+      send({ type: "hello", info });
+      setTimeout(() => resolve({ send, drop: () => sock.destroy(), close: () => { frame(8, Buffer.alloc(0)); setTimeout(() => sock.destroy(), 50); } }), 60);
+    });
+    req.end();
+  });
+}
 
 (async () => {
   await sleep(400);
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
   assert.equal(init.result.protocolVersion, "2025-06-18");
-  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.3.0");
+  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.4.0");
   assert.ok(init.result.capabilities.prompts && /get_context/.test(init.result.instructions));
   srv.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
@@ -100,9 +134,14 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
 
   /* one file */
   const big = Buffer.alloc(3 * 1024 * 1024, 7).toString("base64"); // ~4 MB string
-  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.3.0", session: "sA" };
+  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.4.0", session: "sA" };
+  let heldId = null, slowId = null, aPaused = false;
   const handlerA = (m) => {
-    if (m.command === "ping") return ping(infoA);
+    if (m.command === "ping") return Object.assign(ping(infoA), aPaused ? { paused: true } : {});
+    if (m.command === "get_tree" && m.params.node_id === "hold") { heldId = m.id; return undefined; }
+    if (m.command === "run_code" && m.params.code === "slow") { slowId = m.id; return undefined; }
+    if (m.command === "find_nodes" && m.params.name === "huge") return { count: 20000, nodes: Array.from({ length: 20000 }, (_, i) => ({ id: "1:" + i, name: "Layer with a fairly long name " + i, type: "RECTANGLE", path: "Screen › Section › Card" })) };
+    if (m.command === "export_nodes" && m.params.format === "PDF") return { format: "PDF", files: [{ id: "../../../evil", name: "..", base64: Buffer.from("%PDF").toString("base64"), bytes: 4 }] };
     if (m.command === "run_code") return m.params.code.includes("throw") ? new Error("boom") : { value: { len: m.params.code.length, by: "A" }, logs: ["hi"] };
     if (m.command === "screenshot") return { base64: big, id: "1:2", name: "Frame", width: 390, height: 844 };
     if (m.command === "place_image") return { node: { id: "9:9", name: m.params.name }, got: { base64: m.params.base64 ? m.params.base64.length : 0, svg: m.params.svg ? m.params.svg.length : 0 } };
@@ -114,7 +153,7 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   r = await tool("status");
   const st = JSON.parse(txt(r));
   console.log("status:", txt(r).replace(/\s+/g, " "));
-  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.3.0"); assert.ok(!st.notes && !st.files);
+  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.4.0"); assert.ok(!st.notes && !st.files);
 
   const longCode = "// " + "x".repeat(300000) + "\nreturn 1";   // > 64 KB → 64-bit frame length, server→client
   r = await tool("run_code", { code: longCode });
@@ -167,8 +206,109 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   assert.equal(JSON.parse(txt(r)).folder, path.join(HOME, "relative", "icons"), "relative folders start at the home folder");
   console.log("export_nodes OK →", ex.folder);
 
+  /* 1.4: hardening */
+  {
+    // a file name or id from Figma can't steer an export out of its folder
+    r = await tool("export_nodes", { format: "PDF", dir: outDir });
+    const pdf = JSON.parse(txt(r)).files[0];
+    assert.equal(path.dirname(pdf.path), outDir, pdf.path);
+    // only the connection a command went to may answer it; ids can't be guessed
+    const infoZ = { file: "Zeta", page: "P", editorType: "figma", version: "1.4.0", session: "sZ" };
+    const Z = fakePlugin(infoZ, (m) => (m.command === "ping" ? ping(infoZ) : undefined));
+    await Z.ready;
+    const held = tool("get_tree", { node_id: "hold", file: "Product" });
+    await sleep(120);
+    assert.ok(typeof heldId === "string" && heldId.length >= 16, "command ids are random: " + heldId);
+    Z.send({ type: "result", id: heldId, ok: true, result: { forged: true } });
+    await sleep(80);
+    A.send({ type: "result", id: heldId, ok: true, result: { real: true } });
+    r = await held;
+    assert.ok(/"real":true/.test(txt(r)) && !/forged/.test(txt(r)), txt(r));
+    Z.close();
+    await sleep(120);
+    // a socket that never says who it is gets closed
+    const mute = new WebSocket("ws://localhost:" + PORT);
+    const closed = await new Promise((res) => { mute.onclose = () => res(true); setTimeout(() => res(false), 2500); });
+    assert.ok(closed, "silent socket closed");
+    // DNS rebinding: a page under another domain name is refused
+    const withHost = (url, host) => new Promise((res) => {
+      const req = require("http").request({ host: "127.0.0.1", port: PORT, path: url, headers: Object.assign({ Host: host }, url === "/" ? { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==" } : {}) });
+      req.on("upgrade", (x, sock) => { sock.destroy(); res(101); });
+      req.on("response", (x) => res(x.statusCode));
+      req.on("error", () => res("error"));
+      req.end();
+    });
+    assert.equal(await withHost("/", "evil.example:" + PORT), 403);
+    assert.equal(await withHost("/status", "attacker.test"), 403);
+    assert.equal(await withHost("/status", "localhost:" + PORT), 200);
+    // garbage on stdin doesn't stop the server
+    srv.stdin.write("null\n5\n\"x\"\n");
+    assert.ok((await rpc("ping", {})).result, "still alive");
+    console.log("hardening OK (answers only from the right socket, random ids, hello timeout, Host check, stdin, export folder)");
+
+    // writes carry a deadline (a change Figma hasn't started when Claude gives up is dropped); reads don't
+    await tool("run_code", { code: "return 1" });
+    assert.equal(typeof A.calls.filter((m) => m.command === "run_code").pop().deadline, "number");
+    assert.equal(A.calls.filter((m) => m.command === "get_tree").pop().deadline, undefined);
+    // a change that times out "may still have been applied", and its late answer is reported
+    r = await tool("run_code", { code: "slow", timeout_ms: 300 });
+    assert.ok(r.isError && /may still have been applied/.test(txt(r)), txt(r));
+    A.send({ type: "result", id: slowId, ok: true, result: { value: 1 } });
+    await sleep(100);
+    r = await tool("get_tree", { node_id: "n1" });
+    assert.ok(/^\[Note: The run_code that timed out .* finished later in Figma: it was applied\.\]/.test(txt(r)), txt(r));
+    r = await tool("get_tree", { node_id: "n1" });
+    assert.ok(!/\[Note:/.test(txt(r)), "reported once");
+    console.log("late changes reported OK");
+
+    // figma.com links and dash ids
+    r = await tool("get_tree", { node_id: "https://www.figma.com/design/AbCdEf123456/Product?node-id=12-34&t=abc" });
+    assert.equal(A.calls.filter((m) => m.command === "get_tree").pop().params.node_id, "12:34");
+    await tool("update_nodes", { items: [{ id: "56-78", name: "x" }, { ids: ["1-2", "I3-4;5-6"], visible: false }] });
+    const un = A.calls.filter((m) => m.command === "update_nodes").pop().params.items;
+    assert.deepEqual([un[0].id, un[1].ids], ["56:78", ["1:2", "I3:4;5:6"]]);
+    // results stay inside the context budget, with a note first
+    r = await tool("find_nodes", { name: "huge" });
+    const big2 = JSON.parse(txt(r));
+    assert.ok(Object.keys(big2)[0] === "note" && /nodes shows \d+ of 20000/.test(big2.note) && /offset/.test(big2.note), big2.note);
+    assert.ok(txt(r).length * 0.4 <= 20000 && big2.nodes.length > 100, "fits: " + txt(r).length);
+    // paused changes show in status
+    aPaused = true;
+    const stp = JSON.parse(txt(await tool("status")));
+    assert.ok(stp.paused && stp.notes.some((n) => /Allow changes/.test(n)));
+    aPaused = false;
+    // annotations
+    const t = (n) => list.result.tools.find((x) => x.name === n);
+    assert.ok(t("get_spec").annotations.readOnlyHint && t("delete_nodes").annotations.destructiveHint && !t("build").annotations.readOnlyHint);
+    const catalog = JSON.stringify(list.result.tools).length;
+    assert.ok(catalog < 27000, "catalog " + catalog + " chars: no bigger than 1.3's 22 tools (27.1K) despite get_spec and annotations");
+    console.log("ids, budget, paused, annotations OK (catalog " + catalog + " chars)");
+
+    // a dropped socket gets a moment to come back; meanwhile changes without file don't go elsewhere
+    const infoR = { file: "Raw file", page: "P", editorType: "figma", version: "1.4.0", session: "sR" };
+    let rawHeld = null;
+    const onCmd = (m, send) => { if (m.command === "ping") send({ type: "result", id: m.id, ok: true, result: ping(infoR) }); else rawHeld = m; };
+    const R1 = await rawPlugin(infoR, onCmd);
+    const pend = tool("run_code", { code: "return 1", file: "Raw file" });
+    await sleep(120);
+    assert.ok(rawHeld && rawHeld.command === "run_code");
+    R1.drop();
+    await sleep(150);
+    r = await tool("run_code", { code: "return 2" });
+    assert.ok(r.isError && /reconnecting/.test(txt(r)), txt(r));
+    const R2 = await rawPlugin(infoR, onCmd);
+    R2.send({ type: "result", id: rawHeld.id, ok: true, result: { value: "after reconnect" } });
+    r = await pend;
+    assert.ok(!r.isError && /after reconnect/.test(txt(r)), txt(r));
+    R2.close();
+    await sleep(150);
+    r = await tool("run_code", { code: "return 3" });
+    assert.ok(!r.isError, "a plugin that closed normally doesn't block changes: " + txt(r));
+    console.log("dropped socket: calls survive the reconnect, write guard holds OK");
+  }
+
   /* a second file: the library */
-  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.3.0", session: "sB" };
+  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.4.0", session: "sB" };
   let holdB = false;
   const B = fakePlugin(infoB, (m) => {
     if (m.command === "ping") return ping(infoB);
@@ -181,18 +321,18 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   const st2 = JSON.parse(txt(r));
   assert.equal(st2.files.length, 2); assert.equal(st2.files[0].file, "Savepet Library"); assert.equal(st2.files[0].active, true);
   r = await tool("get_context", {});
-  assert.ok(txt(r).startsWith("[Figma file: Savepet Library]") && /"by": "B"/.test(txt(r)), "reads go to the file opened last");
+  assert.ok(txt(r).startsWith("[Figma file: Savepet Library]") && /"by": ?"B"/.test(txt(r)), "reads go to the file opened last");
   A.send({ type: "activity", what: "select" });
   await sleep(100);
   r = await tool("get_context", {});
-  assert.ok(/"by": "A"/.test(txt(r)), "…then to the file the user was last active in");
+  assert.ok(/"by": ?"A"/.test(txt(r)), "…then to the file the user was last active in");
   r = await tool("run_code", { code: "return 1" });
   assert.ok(r.isError && /several Figma files/.test(txt(r)) && /last active in "Product"/.test(txt(r)), txt(r));
   console.log("changes need file when two files are open OK:", txt(r).slice(7, 120) + "…");
   r = await tool("run_code", { code: "return 2", file: "library" });
-  assert.ok(!r.isError && /"by": "B"/.test(txt(r)), txt(r));
+  assert.ok(!r.isError && /"by": ?"B"/.test(txt(r)), txt(r));
   r = await tool("set_variables", { ops: [{ op: "set", name: "x", value: 1 }], file: "https://www.figma.com/design/AbCdEf123456/Product?node-id=1-2" });
-  assert.ok(/"by": "A"/.test(txt(r)), "a Figma link picks the file by its key");
+  assert.ok(/"by": ?"A"/.test(txt(r)), "a Figma link picks the file by its key");
   r = await tool("run_code", { code: "return 3", file: "nope" });
   assert.ok(r.isError && /No open Figma file matches "nope"/.test(txt(r)) && /Savepet Library/.test(txt(r)));
   r = await tool("set_page", { name: "Tokens" });
@@ -221,7 +361,7 @@ const ping = (info) => ({ file: info.file, page: "Page 1", editorType: "figma", 
   r = await pending;
   assert.ok(r.isError && /Savepet Library" disconnected/.test(txt(r)), txt(r));
   r = await tool("run_code", { code: "return 4" });
-  assert.ok(!r.isError && /"by": "A"/.test(txt(r)), "one file left: no file needed");
+  assert.ok(!r.isError && /"by": ?"A"/.test(txt(r)), "one file left: no file needed");
   console.log("disconnect fails only that file's calls OK");
 
   /* reconnect via 127.0.0.1 works too */

@@ -12,6 +12,9 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost o
 
 - **Knows what you're working on.** Claude reads your selection (and the text you're editing), the part of the canvas on your screen, and what you did in the last minutes, so "fix this" and "make one like here" just work.
 - **Sees what you see.** `screenshot` exports a layer, the area around your selection, or exactly what's on your screen.
+- **You see what Claude did.** The plugin window lists every call with a plain summary ("Changed 6 layers"), a **Show** button that selects and zooms to the layers it touched, and a toast on the canvas after each change. Changes run one at a time, each one Cmd+Z. Switch off **Allow changes** to let Claude look but not touch, or **Save version** for a restore point.
+- **Reads designs for code.** `get_spec` returns a whole frame with CSS-ready values (px, fill/hug, flexbox, borders, shadows, typography, styled text runs), `{token}` names with their code syntax, components with their props, and repeated instances listed once, so Claude writes code that matches.
+- **New work lands beside yours.** Screens, images and instances Claude adds go to the right of what you selected or are looking at, never on top of your frames.
 - **Variables, styles and libraries.** Create and edit variables, modes and aliases, bind them to layers, create styles, use and import library components, styles and variables.
 - **Shaders.** List the shaders available to the file and apply them as a fill, stroke or effect, with their properties set by name (colours, numbers, points, gradients, variables).
 - **Tidy and polish, check designs.** `audit_design` finds default names, hard-coded values that match a variable, off-grid spacing, half pixels, low text contrast and more, and fixes the safe ones. `update_nodes` changes many layers in one go: text, styles, variants, auto layout, prototype links.
@@ -19,6 +22,7 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost o
 - **Several files at once.** Keep the plugin open in a library file and a product file together; Claude works in both.
 - **Quick actions.** Ready-made prompts (Tidy and polish, Check design, Generate a design, Rewrite or translate text, Edit variables, Make a prototype, Hand off to code, Edit a library).
 - **Full Plugin API.** Anything a Figma plugin can do, Claude can do through `run_code`.
+- **Light on Claude's context.** 23 tools in about 7K tokens (tool-by-tool MCP servers often take 25K+), compact results capped at about 20K tokens with a note saying how to get the rest, and read-only tools marked so you can always allow them.
 - **No dependencies, local only.** The server is one Node.js file (Node 18+) that listens on `127.0.0.1` / `::1`; the plugin is plain JavaScript. Several Claude windows (desktop, Cowork, Claude Code) share one connection.
 
 ---
@@ -182,7 +186,7 @@ Import the **manifest from this repo**. Don't create a new plugin with Figma's "
 
 1. Open the Figma file you want Claude to work in. A separate working file or a duplicated page is a good idea.
 2. Run **Plugins → Development → Claude Bridge**. To run it again later, use **Plugins → Development**, the recent plugins list, or Cmd+Option+P / Ctrl+Alt+P.
-3. **Keep the plugin window open** while Claude works. Closing it disconnects Claude. You can move or collapse the window.
+3. **Keep the plugin window open** while Claude works. Closing it disconnects Claude. You can move it, collapse it, or drag its bottom-right corner to resize it (the size is remembered).
 4. Ask Claude for what you want in plain words.
 
 The plugin window shows:
@@ -192,8 +196,12 @@ The plugin window shows:
 | 🟢 green dot | Connected to the bridge |
 | 🟠 amber dot | Connecting |
 | 🔴 red dot | Not connected. It retries every 2 seconds on its own. |
-| Log | Each command Claude sends (`run_code`, `screenshot`, …) and any errors |
-| Port / Reconnect | Change the port, or force a reconnect |
+| Timeline | One row per call: a plain summary ("Created 14 layers", "Read the design (32 layers)"), duration and time. Changes carry "↶ 1 undo"; reads are dimmed. Click a row to see the request and the result. |
+| **Show** | Selects the layers a call touched and zooms to them (at most 400%). The toast Figma shows after each change has the same button. |
+| **Allow changes** | Off: Claude can still look at this file but every change is refused, with a message telling Claude to ask you. |
+| **Changes only** | Hides the reads in the timeline. |
+| **Save version** | Saves "Before Claude · 14:32" in the file's version history. |
+| Copy log · Port · Reconnect | Copy the timeline as text, change the port, or force a reconnect. |
 
 ### Example requests
 
@@ -254,8 +262,9 @@ Claude sees these tools. With some clients they're prefixed with the server name
 | `get_context` | `activity` (default 15), `since_seconds`, `depth` (default 2), `max_layers` | What you're looking at and doing: file, page, selection (and text being edited), the viewport (zoom, bounds, the frame in focus at the centre of the screen, the layers in view) and recent activity (select, edit, create, delete, page, viewport, styles; by you, a collaborator or Claude). |
 | `get_selection` | `depth` (default 1), `brief` | Full details of each selected layer: path, position, size, fills/strokes as hex, radius, effects, auto layout and sizing, text and typography, styles, bound variables, variable modes, component info (main component, variant, key, library or local, property values), plus the colours in the selection. |
 | `screenshot` | `node_id`, `viewport`, `scale`, `max_size` (default 1600) | An image of a layer; or with `viewport: true` exactly what's on your screen. No arguments: the selected layer, the area around several selected layers, or your screen. |
-| `get_tree` | `node_id`, `depth` (default 2) | Layer tree of a node, or of the current page. |
-| `find_nodes` | `scope` (page/selection/file) or `node_id`, `type`, `name`, `text`, `component`, `limit` | Search layers by type, name (or `/regex/`), text content or component; flat list with ids, paths, text, fonts and text styles. |
+| `get_spec` | `node_id` or `ids` (default: selection, else the frame on screen), `depth`, `max_nodes` (default 350), `force`, `include_hidden`, `dedupe` | One deep read for writing code: every layer with CSS-ready values, `{token}` names, components, styled text runs, icons as single layers, repeated instances once, plus tables of tokens (code syntax, value per mode), styles and components. Too big → a plan of sections. See [below](#get_spec-for-code). |
+| `get_tree` | `node_id`, `depth` (default 2), `max_nodes` (default 400) | Layer tree of a node, or of the current page, level by level; `more` marks where layers were left out. |
+| `find_nodes` | `scope` (page/selection/file) or `node_id`, `type`, `name`, `text`, `component`, `limit`, `offset` | Search layers by type, name (or `/regex/`), text content or component; flat list with ids, paths, text, fonts and text styles. `next_offset` pages through long lists. |
 | `list_pages` | — | All pages, plus the current one. |
 
 **Changing things**
@@ -264,7 +273,7 @@ Claude sees these tools. With some clients they're prefixed with the server name
 |---|---|---|
 | `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, `shader`, any other property, remove. |
 | `audit_design` | `node_id` or `scope`, `checks`, `fix`, `grid` (default 4) | Design check: default names, values that match a variable, hard-coded colours, text without style, half pixels, off-grid spacing, WCAG contrast, small tap targets, hidden/empty layers, frames without auto layout. `fix: ["bind","round","autolayout"]` applies the safe fixes. |
-| `build` | `spec` (object or array), `parent_id` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes, shaders and prototype links. |
+| `build` | `spec` (object or array), `parent_id`, `position` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes, shaders and prototype links. On the page without x/y, new layers go beside your work (`position: "auto"`, default), in the middle of the screen (`"viewport"`) or at 0,0 (`"origin"`). |
 | `run_code` | `code` (string, required), `timeout_ms` (default 60000) | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
 | `set_page` | `page_id` or `name`, `create` | Switches page. With `create: true`, a missing page is created. |
 | `delete_nodes` | `ids` | Deletes layers. Pages and the document are never deleted. |
@@ -274,18 +283,18 @@ Claude sees these tools. With some clients they're prefixed with the server name
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit` | Local collections, modes and every value per mode (hex colours, `{aliases}`), scopes, code syntax; with `library: true` also the variables of enabled libraries (with keys). |
+| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit`, `offset` | Local collections, modes and every value per mode (hex colours, `{aliases}`), scopes, code syntax; with `library: true` also the variables of enabled libraries (with keys). |
 | `set_variables` | `ops`, `save_version` | Batch: create/rename/delete collections and modes, create or update variables (values per mode, aliases, scopes, code syntax, description, hidden), rename, delete. Stops at the first error and reports before → after values. |
 | `bind_variables` | `bindings`, `modes`, `save_version` | Bind variables (local or library, by name) to fills, strokes, sizes, spacing, padding, radius, opacity, visibility, text and typography; set or reset a frame's mode per collection. |
 | `get_library` | `kind`, `query`, `used_remote`, `limit` | Local styles with values, local components and sets (keys, variants, properties), variable collections (local and library), shaders (with their properties once imported), and the library components used on the page. |
 | `set_styles` | `ops`, `save_version` | Create, update, rename or delete paint, text, effect and grid styles; bind style colours and typography to variables. |
-| `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y` | Import a published variable, style, component or component set by key; components are placed as instances. |
+| `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y`, `position` | Import a published variable, style, component or component set by key; components are placed as instances. |
 
 **Files on your computer**
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `place_image` | `source` (path, https link or data: URL), `node_id`, `add`, `parent_id`, `x`, `y`, `width`, `height`, `scale_mode` | PNG/JPEG/GIF become image fills (on a layer or a new rectangle); SVG files become vector layers. |
+| `place_image` | `source` (path, https link or data: URL), `node_id`, `add`, `parent_id`, `x`, `y`, `width`, `height`, `scale_mode`, `position` | PNG/JPEG/GIF become image fills (on a layer or a new rectangle); SVG files become vector layers. |
 | `export_nodes` | `ids` (default selection), `format` (PNG/JPG/SVG/PDF), `scale`, `dir`, `overwrite` | Writes the exports into a folder (default `~/Figma Exports/<file>`) and returns the paths. |
 
 ### `run_code` in detail
@@ -410,6 +419,29 @@ Using the design system:
 
 ---
 
+### `get_spec` for code
+
+`get_spec` is what Claude reads before writing code from a design. One call on a screen returns something like:
+
+```jsonc
+{ "nodes": [{ "id": "1:2", "name": "Reward card", "type": "frame", "w": "fill", "h": "hug",
+    "layout": { "dir": "column", "gap": "{space/md}", "padding": [24, 20], "align": "center" },
+    "bg": "{bg/surface}", "radius": 16, "boxShadow": "0px 4px 12px 0px #00000026",
+    "children": [
+      { "id": "1:3", "name": "Title", "type": "text", "w": "fill", "h": "hug",
+        "text": { "content": "Daily bonus", "font": "Inter", "weight": 600, "size": 20, "lineHeight": 28, "case": "uppercase", "color": "{text/primary}" } },
+      { "id": "1:4", "name": "Button", "type": "instance", "component": { "name": "Button", "variant": { "Size": "L" }, "props": { "Label": "Claim" } } },
+      { "id": "1:9", "name": "Button", "type": "instance", "same": "1:4" } ] }],
+  "tokens": { "bg/surface": { "type": "color", "collection": "Theme", "web": "var(--bg-surface)", "modes": { "Light": "#FFFFFF", "Dark": "#111827" }, "value": "#FFFFFF" } },
+  "components": { "Button": { "key": "…", "uses": 2, "variants": ["Size", "State"] } } }
+```
+
+- Sizes are px numbers, `"hug"` (fit content) or `"fill"` (stretch in the parent's auto layout). `layout` is flexbox; `pos` (`left`/`right`/`top`/`bottom`/`centerX`…) only appears on layers placed freely, worked out from their constraints.
+- Bound values read `'{name}'` and every token used is listed once with its code syntax and its value per mode (and in the mode the frame uses).
+- Text that mixes styles gets `runs` (bold words, colours, links). Icons (frames of vectors) are one layer marked `icon: true`: export them with `export_nodes` as SVG. Hidden layers are left out unless `include_hidden`.
+- Repeated instances that look the same point to the first one with `same`; when only their text differs they carry `texts`.
+- Above `max_nodes` layers (350) the answer is a `plan` of sections with their layer counts, to read one by one.
+
 ## Writing good `run_code`
 
 These notes are for people and agents writing code for the bridge. Most of them are Figma quirks we ran into in real files.
@@ -478,7 +510,11 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 
 **Screenshots of your screen.** To render exactly what's in view, the plugin puts a temporary rectangle (filled with the canvas colour) under everything on the page at the viewport bounds, exports it with `contentsOnly: false` (which draws every overlapping layer), and removes it right away.
 
-**Undo.** The plugin calls `figma.commitUndo()` after each changing command, so every Claude action is a separate Cmd+Z step.
+**Undo, one change at a time.** Changing commands run one after another in each file (reads don't wait), and the plugin calls `figma.commitUndo()` after each one, so every Claude action is exactly one Cmd+Z step even when several calls arrive together.
+
+**When the line drops or Figma is slow.** Command ids are random and an answer is only accepted from the file the command went to. A change that times out is reported as "may still have been applied"; if its answer arrives later, the next reply for that file says whether it landed. A change still waiting in the queue when Claude gives up is dropped, not applied late. A plugin that drops without closing gets 15 seconds to come back, and its calls carry on over the new connection; meanwhile changes without `file` don't go to the other open file. Each side pings every 20 seconds and a connection that answers nothing for a minute is closed.
+
+**Results that fit.** Replies are compact JSON. Above about 20K tokens (`FIGMA_BRIDGE_MAX_TOKENS`) the longest lists are halved until the result fits, and a `note` first says what was left out and how to ask for the rest (node_id, offset…). figma.com links and `12-34` ids are accepted wherever a node id is, and a link also picks its file.
 
 ---
 
@@ -498,7 +534,8 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 | *"Reading team libraries needs the teamlibrary permission"* | Same: re-run the plugin so Figma loads the updated `manifest.json`. |
 | *"macOS did not let Claude access …"* (images or exports) | Allow Claude in System Settings → Privacy & Security → Files and Folders, or use a folder directly in your home folder. |
 | A rectangle named *"Claude capture (temporary)"* stays on the page | A screen capture was interrupted. Delete it; the plugin also removes leftovers when it starts. |
-| `run_code` times out | Split the work or use the background-job pattern in [Writing good `run_code`](#writing-good-run_code). Also check that Figma isn't showing a modal dialog. |
+| `run_code` times out | Split the work or use the background-job pattern in [Writing good `run_code`](#writing-good-run_code). Also check that Figma isn't showing a modal dialog. A change that timed out may still land: the next reply says so when it does. |
+| Claude says *"Changes are paused in the Claude Bridge window"* | **Allow changes** is off in the plugin window of that file. Switch it back on. |
 | Text errors like *"unloaded font"* | Load the exact font family and style first. Use `figma.listAvailableFontsAsync()` to see what's installed. |
 | Tools don't show up in Claude | Claude desktop: check **Settings → Developer** for errors from `figma-bridge`. Claude Code: run `claude mcp list` and `/mcp`. Test the server by hand: `node server/index.js` (Ctrl+C to stop). |
 
@@ -516,7 +553,9 @@ Logs go to stderr with the `[figma-bridge]` prefix. stdout is reserved for MCP. 
 ## Security
 
 - The server binds only to `127.0.0.1` and `::1`. It is not reachable from your network.
-- Web pages can't use it either: browsers always send an `Origin` header with WebSockets, and the server only accepts the plugin window (origin `null` or `figma.com`) and other copies of itself (no origin).
+- Web pages can't use it either: browsers always send an `Origin` header with WebSockets, and the server only accepts the plugin window (origin `null` or `figma.com`) and other copies of itself (no origin). The `Host` header must name this computer (`localhost`, `127.0.0.1`, `[::1]`), which stops DNS-rebinding tricks.
+- An answer counts only from the file the command was sent to, command ids are random, a connection must say who it is within 10 seconds, and messages are capped at 256 MB.
+- Exports always stay inside the folder Claude was given, whatever the layer is called.
 - The plugin's manifest allows network access only to `localhost:3055` (`devAllowedDomains`). It can't reach the internet.
 - `run_code` lets Claude run **any** Plugin API code in the open file: read, change or delete layers. Use the bridge on files you're comfortable letting Claude edit, keep version history, and close the plugin when you're done.
 - `place_image` reads the image file or link Claude is given, and `export_nodes` writes files into the folder Claude is given. Both run with your user's permissions on your computer, only when Claude calls them.
@@ -544,9 +583,10 @@ claude-to-figma/
 ├── figma-plugin/
 │   ├── manifest.json        Plugin manifest (dynamic-page, teamlibrary, localhost-only network access)
 │   ├── code.js              Main thread: runs commands with the Plugin API, keeps the activity log
-│   └── ui.html              Plugin window: WebSocket client + status and log
+│   └── ui.html              Plugin window: WebSocket client, timeline with Show, Allow changes, resize
 ├── install-mac.sh           macOS installer for Claude desktop
 ├── test/
+│   ├── smoke.test.js        The server starts and lists its tools (runs on Node 18)
 │   ├── plugin.test.js       code.js handlers against a strict mock Figma API (variables, libraries, viewport, activity…)
 │   ├── server.test.js       MCP tools and prompts, several files, big payloads, local images and exports
 │   ├── multi.test.js        hub + relays, failover, two files through relays, old-version detection
@@ -567,18 +607,19 @@ The tests use ports 3997–3999, so they don't touch a bridge running on 3055.
 
 ```jsonc
 // plugin → server, on connect
-{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.3.0", "session": "…" } }
+{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.4.0", "session": "…" } }
 // plugin → server, while open
-{ "type": "info", "info": { "page": "…" } }          // page changed
+{ "type": "info", "info": { "page": "…" } }          // page changed (or { "paused": true })
 { "type": "activity", "what": "select" }               // the user did something here (at most once a second)
 // server → plugin
-{ "id": 7, "command": "run_code", "params": { "code": "return 1" } }
+{ "id": "6f1c…", "command": "run_code", "params": { "code": "return 1" }, "deadline": 1760000000000 }   // deadline: changes only
 // plugin → server
-{ "type": "result", "id": 7, "ok": true, "result": { "value": 1, "logs": [] } }
-{ "type": "result", "id": 7, "ok": false, "error": "message" }
+{ "type": "result", "id": "6f1c…", "ok": true, "result": { "value": 1, "logs": [] } }
+{ "type": "result", "id": "6f1c…", "ok": false, "error": "message" }
+// plugin main thread → plugin window only (never forwarded): { "type": "done", "rid", "summary", "touched", "ms", "write" }
 ```
 
-Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, command, params, timeout, target?, write? }` or `{ type: "status", id }`. They receive `{ type: "reply", id, ok, result | error, file?, files? }`.
+Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, command, params, timeout, target?, write? }` or `{ type: "status", id }`. They receive `{ type: "reply", id, ok, result | error, file?, files?, notes? }`.
 
 **Adding a command:**
 
@@ -586,4 +627,6 @@ Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, co
 2. Add a tool to `TOOLS` in `server/index.js` that calls `callPlugin("<command>", params, timeout, a.file, write)`.
 3. Add a test in `test/plugin.test.js`.
 
-**Releasing:** bump `VERSION` in `server/index.js` and `version` in `package.json` together. Relays use the hub's version string to detect old bridges.
+**Releasing:** bump `VERSION` in `server/index.js`, `VERSION` in `figma-plugin/code.js` and `version` in `package.json` together. Relays use the hub's version string to detect old bridges, and `status` compares the plugin's.
+
+**Credits.** Some 1.4 ideas (the deep design read, the activity panel with Show, transport hardening) were inspired by [figwright](https://github.com/awdr74100/figwright) (MIT, © Roya); the code here is written for this project.

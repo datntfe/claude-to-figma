@@ -52,13 +52,18 @@ SIM = """
 window.__file = %s;
 window.addEventListener('message', function (ev) {
   var m = ev.data && ev.data.pluginMessage; if (!m) return;
-  if (m.type === 'ui-ready') window.postMessage({ pluginMessage: { type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.3.0', session: window.__file } } }, '*');
+  if (m.type === 'ui-ready') window.postMessage({ pluginMessage: { type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.4.0', session: window.__file } } }, '*');
   if (m.type === 'command') {
     var result = m.command === 'run_code' ? { value: 'ran ' + m.params.code.length + ' chars in ' + window.__file, logs: [] }
-      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.3.0' }
+      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.4.0' }
       : { echo: m.command, file: window.__file };
-    setTimeout(function () { window.postMessage({ pluginMessage: { type: 'result', id: m.id, ok: true, result: result } }, '*'); }, 10);
+    setTimeout(function () {
+      window.postMessage({ pluginMessage: { type: 'result', id: m.id, ok: true, result: result } }, '*');
+      window.postMessage({ pluginMessage: { type: 'done', rid: m.id, command: m.command, ok: true, ms: 12, write: m.command === 'run_code',
+        summary: m.command === 'run_code' ? 'Ran code' : 'Read', touched: m.command === 'run_code' ? ['12:34'] : [], preview: JSON.stringify(result) } }, '*');
+    }, 10);
   }
+  if (m.type === 'ui-focus' || m.type === 'allow' || m.type === 'ui-save-version') (window.__panel = window.__panel || []).push(m);
 });
 """
 ok = True
@@ -78,6 +83,20 @@ try:
         rc = tool("run_code", {"code": "return 1+1"})
         print("run_code via browser UI:", rc.replace("\n", " "))
         ok &= "ran 10 chars" in rc
+        # the panel shows a timeline row with the summary, the undo badge and a Show button
+        pg.wait_for_function("document.getElementById('log').innerText.includes('Ran code')", timeout=4000)
+        row = pg.inner_text("#log")
+        print("timeline:", row.replace("\n", " | "))
+        ok &= "↶ 1 undo" in row and "Show" in row
+        pg.click("text=Show")
+        pg.click("#allow")
+        time.sleep(0.2)
+        panel = pg.evaluate("window.__panel || []")
+        print("panel messages:", panel)
+        ok &= any(m.get("type") == "ui-focus" and m.get("ids") == ["12:34"] for m in panel)
+        ok &= any(m.get("type") == "allow" and m.get("on") is False for m in panel)
+        ok &= "Changes paused" in pg.inner_text("#status")
+        pg.click("#allow")
 
         # A second Figma file opens the plugin too: both stay connected.
         pg2 = b.new_page()
@@ -97,7 +116,7 @@ try:
         ok &= '"Browser test file"' in ctx
         both_on = pg.evaluate("document.getElementById('dot').className") + " " + pg2.evaluate("document.getElementById('dot').className")
         ok &= both_on.count("on") == 2
-        print("UI log:", pg.inner_text("#log").replace("\n", " | "))
+        print("UI log:", pg.inner_text("#log").replace("\n", " | ")[:300])
         pg2.close()
 
         # Server goes away -> UI shows disconnected, then reconnects to a new server by itself.

@@ -12,6 +12,9 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, chỉ trong
 
 - **Biết bạn đang làm gì.** Claude đọc được vùng chọn (cả đoạn text đang sửa), phần canvas đang hiện trên màn hình và những thao tác vài phút gần đây, nên chỉ cần nói "sửa cái này", "làm giống chỗ này".
 - **Thấy cái bạn đang thấy.** `screenshot` chụp một layer, vùng quanh các layer đang chọn, hoặc đúng phần đang hiện trên màn hình.
+- **Bạn thấy Claude đã làm gì.** Cửa sổ plugin liệt kê từng lệnh với tóm tắt dễ hiểu ("Changed 6 layers"), nút **Show** để chọn và zoom tới đúng các layer vừa bị sửa, và một thông báo trên canvas sau mỗi lần sửa. Các thay đổi chạy lần lượt, mỗi cái đúng một lần Cmd+Z. Tắt **Allow changes** để Claude chỉ được xem, không được sửa; **Save version** để lưu điểm khôi phục.
+- **Đọc thiết kế để viết code.** `get_spec` trả về cả frame với giá trị dùng ngay cho CSS (px, fill/hug, flexbox, border, shadow, typography, đoạn text nhiều style), tên `{token}` kèm code syntax, component kèm property, và instance lặp lại chỉ liệt kê một lần, nên code Claude viết ra khớp thiết kế.
+- **Layer mới nằm cạnh chỗ bạn làm.** Màn hình, ảnh, instance Claude thêm vào sẽ nằm bên phải phần bạn đang chọn hoặc đang xem, không bao giờ đè lên frame của bạn.
 - **Variables, styles và library.** Tạo, sửa variable, mode, alias, gắn variable vào layer, tạo style, dùng và import component, style, variable từ library.
 - **Shader.** Xem các shader file đang dùng được và áp chúng làm fill, stroke hoặc effect, chỉnh property theo tên (màu, số, điểm, gradient, variable).
 - **Dọn dẹp và soát thiết kế.** `audit_design` tìm tên layer mặc định, giá trị hard-code trùng variable, spacing lệch grid, lệch pixel, chữ thiếu tương phản…, và tự sửa phần an toàn. `update_nodes` sửa hàng loạt layer một lần: text, style, variant, auto layout, link prototype.
@@ -19,6 +22,7 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, chỉ trong
 - **Nhiều file cùng lúc.** Mở plugin ở cả file library và file sản phẩm, Claude làm được ở cả hai.
 - **Thao tác nhanh.** Có sẵn các prompt: Tidy and polish, Check design, Generate a design, Viết lại/dịch text, Sửa variables, Làm prototype, Bàn giao code, Sửa library.
 - **Dùng được toàn bộ Plugin API.** Plugin Figma làm được gì thì Claude làm được nấy qua `run_code`.
+- **Nhẹ cho Claude.** 23 tool chỉ tốn khoảng 7K token (các MCP server kiểu mỗi lệnh một tool thường 25K+), kết quả gọn và giới hạn khoảng 20K token kèm ghi chú cách lấy phần còn lại, tool chỉ đọc được đánh dấu để bạn cho phép luôn.
 - **Không cần cài thư viện, chỉ chạy trong máy.** Server là một file Node.js (Node 18+) chỉ nghe trên `127.0.0.1` / `::1`; plugin là JavaScript thuần. Nhiều cửa sổ Claude (desktop, Cowork, Claude Code) dùng chung một kết nối.
 
 ---
@@ -182,7 +186,7 @@ Import **đúng file manifest của repo này**. Đừng tạo plugin mới bằ
 
 1. Mở file Figma bạn muốn Claude làm việc. Nên dùng file làm việc riêng hoặc một page nhân bản.
 2. Chạy **Plugins → Development → Claude Bridge**. Những lần sau có thể mở lại từ **Plugins → Development**, danh sách plugin gần đây, hoặc phím tắt Cmd+Option+P (Ctrl+Alt+P).
-3. **Để cửa sổ plugin mở** trong suốt lúc Claude làm. Đóng cửa sổ là Claude mất kết nối. Bạn có thể kéo hoặc thu nhỏ cửa sổ này.
+3. **Để cửa sổ plugin mở** trong suốt lúc Claude làm. Đóng cửa sổ là Claude mất kết nối. Bạn có thể kéo, thu nhỏ, hoặc kéo góc dưới bên phải để đổi kích thước (lần sau mở vẫn giữ).
 4. Nhắn Claude việc cần làm bằng lời bình thường.
 
 Cửa sổ plugin hiển thị:
@@ -192,8 +196,12 @@ Cửa sổ plugin hiển thị:
 | 🟢 chấm xanh | Đã kết nối với bridge |
 | 🟠 chấm cam | Đang kết nối |
 | 🔴 chấm đỏ | Chưa kết nối. Plugin tự thử lại mỗi 2 giây. |
-| Log | Từng lệnh Claude gửi (`run_code`, `screenshot`…) và lỗi nếu có |
-| Port / Reconnect | Đổi cổng, hoặc buộc kết nối lại |
+| Dòng thời gian | Mỗi lệnh một dòng: tóm tắt ("Created 14 layers", "Read the design (32 layers)"), thời gian chạy và giờ. Lệnh sửa có nhãn "↶ 1 undo"; lệnh chỉ đọc hiện mờ. Bấm vào dòng để xem yêu cầu và kết quả. |
+| **Show** | Chọn các layer mà lệnh đó đụng tới và zoom tới (tối đa 400%). Thông báo Figma hiện sau mỗi lần sửa cũng có nút này. |
+| **Allow changes** | Tắt: Claude vẫn xem được file này nhưng mọi thay đổi bị từ chối, kèm lời nhắn để Claude hỏi bạn. |
+| **Changes only** | Ẩn các lệnh chỉ đọc khỏi dòng thời gian. |
+| **Save version** | Lưu "Before Claude · 14:32" vào lịch sử phiên bản của file. |
+| Copy log · Port · Reconnect | Chép dòng thời gian dạng text, đổi cổng, hoặc buộc kết nối lại. |
 
 ### Ví dụ yêu cầu
 
@@ -254,8 +262,9 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 | `get_context` | `activity` (mặc định 15), `since_seconds`, `depth` (mặc định 2), `max_layers` | Bạn đang xem và làm gì: file, page, vùng chọn (và đoạn text đang sửa), viewport (zoom, vùng hiển thị, frame ở giữa màn hình, các layer đang hiện) và thao tác gần đây (chọn, sửa, tạo, xoá, đổi page, cuộn/zoom, style; do bạn, người cộng tác hay Claude làm). |
 | `get_selection` | `depth` (mặc định 1), `brief` | Chi tiết từng layer đang chọn: đường dẫn, vị trí, kích thước, fill/stroke dạng hex, bo góc, effect, auto layout và sizing, text và typography, style, variable đang gắn, mode, thông tin component (main component, variant, key, library hay local, giá trị property), và các màu trong vùng chọn. |
 | `screenshot` | `node_id`, `viewport`, `scale`, `max_size` (mặc định 1600) | Ảnh của một layer; hoặc `viewport: true` để chụp đúng phần đang hiện trên màn hình. Không truyền gì: layer đang chọn, vùng quanh các layer đang chọn, hoặc màn hình của bạn. |
-| `get_tree` | `node_id`, `depth` (mặc định 2) | Cây layer của một node, hoặc của page hiện tại. |
-| `find_nodes` | `scope` (page/selection/file) hoặc `node_id`, `type`, `name`, `text`, `component`, `limit` | Tìm layer theo loại, tên (hoặc `/regex/`), nội dung text hay component; trả về danh sách phẳng kèm id, đường dẫn, text, font, text style. |
+| `get_spec` | `node_id` hoặc `ids` (mặc định: vùng chọn, không có thì frame trên màn hình), `depth`, `max_nodes` (mặc định 350), `force`, `include_hidden`, `dedupe` | Đọc sâu một lần để viết code: mọi layer với giá trị dùng ngay cho CSS, tên `{token}`, component, đoạn text nhiều style, icon gộp thành một layer, instance lặp lại chỉ một lần, kèm bảng token (code syntax, giá trị từng mode), style và component. Quá lớn → trả về danh sách các phần để đọc lần lượt. Xem [bên dưới](#get_spec-để-viết-code). |
+| `get_tree` | `node_id`, `depth` (mặc định 2), `max_nodes` (mặc định 400) | Cây layer của một node, hoặc của page hiện tại, theo từng tầng; `more` đánh dấu chỗ bị lược bớt. |
+| `find_nodes` | `scope` (page/selection/file) hoặc `node_id`, `type`, `name`, `text`, `component`, `limit`, `offset` | Tìm layer theo loại, tên (hoặc `/regex/`), nội dung text hay component; trả về danh sách phẳng kèm id, đường dẫn, text, font, text style. `next_offset` để lật trang danh sách dài. |
 | `list_pages` | — | Danh sách page và page hiện tại. |
 
 **Sửa thiết kế**
@@ -264,7 +273,7 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 |---|---|---|
 | `update_nodes` | `items: [{ id \| ids, …thay đổi }]`, `save_version` | Sửa hàng loạt không cần code: tên, text, font, cỡ chữ, màu, stroke, bo góc, effect, style, auto layout (cả `mode: "AUTO"` tự suy ra từ vị trí hiện tại), sizing, variable (`'{tên}'`), mode, variant, property của component, swap, `link` prototype, `shader`, thuộc tính bất kỳ, xoá. |
 | `audit_design` | `node_id` hoặc `scope`, `checks`, `fix`, `grid` (mặc định 4) | Soát thiết kế: tên mặc định, giá trị trùng variable, màu hard-code, text không có style, lệch pixel, spacing lệch grid, tương phản WCAG, vùng bấm nhỏ, layer ẩn/rỗng, frame chưa dùng auto layout. `fix: ["bind","round","autolayout"]` để tự sửa phần an toàn. |
-| `build` | `spec` (object hoặc mảng), `parent_id` | Tạo layer từ mô tả JSON, kể cả instance của component local hay library, giá trị `'{variable}'`, style, mode, shader và link prototype. |
+| `build` | `spec` (object hoặc mảng), `parent_id`, `position` | Tạo layer từ mô tả JSON, kể cả instance của component local hay library, giá trị `'{variable}'`, style, mode, shader và link prototype. Đặt trên page mà không có x/y thì layer mới nằm cạnh chỗ bạn làm (`position: "auto"`, mặc định), giữa màn hình (`"viewport"`) hoặc ở 0,0 (`"origin"`). |
 | `run_code` | `code` (chuỗi, bắt buộc), `timeout_ms` (mặc định 60000) | Chạy JavaScript trong plugin với toàn bộ Figma Plugin API. Trả về `{ value, logs }`. |
 | `set_page` | `page_id` hoặc `name`, `create` | Chuyển page. Có `create: true` thì tạo page nếu chưa có. |
 | `delete_nodes` | `ids` | Xoá layer. Không bao giờ xoá page hay cả document. |
@@ -274,18 +283,18 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 
 | Công cụ | Tham số | Việc |
 |---|---|---|
-| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit` | Collection local, các mode và giá trị từng mode (màu hex, `{alias}`), scope, code syntax; thêm `library: true` để xem cả variable của library đã bật (kèm key). |
+| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit`, `offset` | Collection local, các mode và giá trị từng mode (màu hex, `{alias}`), scope, code syntax; thêm `library: true` để xem cả variable của library đã bật (kèm key). |
 | `set_variables` | `ops`, `save_version` | Một lần nhiều thao tác: tạo/đổi tên/xoá collection và mode, tạo hoặc sửa variable (giá trị theo mode, alias, scope, code syntax, mô tả, ẩn khi publish), đổi tên, xoá. Dừng ở lỗi đầu tiên và báo giá trị trước → sau. |
 | `bind_variables` | `bindings`, `modes`, `save_version` | Gắn variable (local hay library, theo tên) vào fill, stroke, kích thước, spacing, padding, bo góc, opacity, ẩn/hiện, text và typography; đặt hoặc trả mode của frame theo từng collection. |
 | `get_library` | `kind`, `query`, `used_remote`, `limit` | Style local kèm giá trị, component và component set local (key, variant, property), collection variable (local và library), shader (kèm property khi đã import), và các component library đang dùng trên page. |
 | `set_styles` | `ops`, `save_version` | Tạo, sửa, đổi tên, xoá paint/text/effect/grid style; gắn màu và typography của style vào variable. |
-| `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y` | Import variable, style, component hay component set đã publish theo key; component được đặt thành instance. |
+| `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y`, `position` | Import variable, style, component hay component set đã publish theo key; component được đặt thành instance. |
 
 **File trên máy bạn**
 
 | Công cụ | Tham số | Việc |
 |---|---|---|
-| `place_image` | `source` (đường dẫn, link https hoặc data: URL), `node_id`, `add`, `parent_id`, `x`, `y`, `width`, `height`, `scale_mode` | PNG/JPEG/GIF thành ảnh fill (trên một layer hoặc hình chữ nhật mới); file SVG thành layer vector. |
+| `place_image` | `source` (đường dẫn, link https hoặc data: URL), `node_id`, `add`, `parent_id`, `x`, `y`, `width`, `height`, `scale_mode`, `position` | PNG/JPEG/GIF thành ảnh fill (trên một layer hoặc hình chữ nhật mới); file SVG thành layer vector. |
 | `export_nodes` | `ids` (mặc định vùng chọn), `format` (PNG/JPG/SVG/PDF), `scale`, `dir`, `overwrite` | Ghi file export vào thư mục (mặc định `~/Figma Exports/<tên file>`) và trả về đường dẫn. |
 
 ### Chi tiết `run_code`
@@ -410,6 +419,29 @@ Dùng design system:
 
 ---
 
+### `get_spec` để viết code
+
+`get_spec` là thứ Claude đọc trước khi viết code từ thiết kế. Gọi một lần trên một màn hình sẽ được kiểu như:
+
+```jsonc
+{ "nodes": [{ "id": "1:2", "name": "Reward card", "type": "frame", "w": "fill", "h": "hug",
+    "layout": { "dir": "column", "gap": "{space/md}", "padding": [24, 20], "align": "center" },
+    "bg": "{bg/surface}", "radius": 16, "boxShadow": "0px 4px 12px 0px #00000026",
+    "children": [
+      { "id": "1:3", "name": "Title", "type": "text", "w": "fill", "h": "hug",
+        "text": { "content": "Phần thưởng mỗi ngày", "font": "Inter", "weight": 600, "size": 20, "lineHeight": 28, "color": "{text/primary}" } },
+      { "id": "1:4", "name": "Button", "type": "instance", "component": { "name": "Button", "variant": { "Size": "L" }, "props": { "Label": "Nhận" } } },
+      { "id": "1:9", "name": "Button", "type": "instance", "same": "1:4" } ] }],
+  "tokens": { "bg/surface": { "type": "color", "collection": "Theme", "web": "var(--bg-surface)", "modes": { "Light": "#FFFFFF", "Dark": "#111827" }, "value": "#FFFFFF" } },
+  "components": { "Button": { "key": "…", "uses": 2, "variants": ["Size", "State"] } } }
+```
+
+- Kích thước là số px, `"hug"` (ôm nội dung) hoặc `"fill"` (giãn theo auto layout của cha). `layout` là flexbox; `pos` (`left`/`right`/`top`/`bottom`/`centerX`…) chỉ có ở layer đặt tự do, tính từ constraints.
+- Giá trị đã gắn variable ghi là `'{name}'`, và mỗi token dùng tới được liệt kê một lần kèm code syntax và giá trị từng mode (cả mode mà frame đang dùng).
+- Text pha nhiều style có `runs` (chữ đậm, màu, link). Icon (frame toàn vector) là một layer có `icon: true`: export bằng `export_nodes` dạng SVG. Layer ẩn bị bỏ qua, trừ khi `include_hidden`.
+- Instance lặp lại trông giống hệt sẽ trỏ về cái đầu tiên bằng `same`; chỉ khác text thì có thêm `texts`.
+- Quá `max_nodes` layer (350) thì kết quả là `plan`: các phần kèm số layer, để đọc lần lượt.
+
 ## Viết `run_code` cho tốt
 
 Phần này dành cho người và agent viết code cho bridge. Phần lớn là những "tật" của Figma đã gặp khi làm trên file thật.
@@ -478,7 +510,11 @@ figma-plugin/code.js   (luồng chính của plugin: chạy lệnh bằng Figma 
 
 **Chụp đúng màn hình của bạn.** Để vẽ đúng phần đang hiện, plugin đặt tạm một hình chữ nhật (màu nền canvas) dưới cùng page, khớp vùng viewport, export nó với `contentsOnly: false` (vẽ mọi layer chồng lên vùng đó), rồi xoá ngay.
 
-**Undo.** Plugin gọi `figma.commitUndo()` sau mỗi lệnh có sửa, nên mỗi thao tác của Claude là một bước Cmd+Z riêng.
+**Undo, mỗi lần một thay đổi.** Trong mỗi file, các lệnh sửa chạy lần lượt (lệnh đọc không phải chờ) và plugin gọi `figma.commitUndo()` sau từng lệnh, nên mỗi thao tác của Claude đúng một bước Cmd+Z kể cả khi nhiều lệnh tới cùng lúc.
+
+**Khi mất kết nối hoặc Figma chậm.** Id lệnh là ngẫu nhiên và chỉ nhận câu trả lời từ đúng file đã nhận lệnh. Lệnh sửa bị timeout được báo là "có thể vẫn đã được áp dụng"; nếu câu trả lời tới muộn, lần trả lời kế tiếp cho file đó sẽ nói nó đã áp dụng hay chưa. Lệnh sửa còn xếp hàng khi Claude đã thôi chờ sẽ bị bỏ, không chạy muộn. Plugin rớt kết nối mà không đóng được chờ 15 giây để nối lại, các lệnh đang chờ đi tiếp qua kết nối mới; trong lúc đó lệnh sửa không có `file` không bị gửi nhầm sang file khác. Hai bên ping nhau mỗi 20 giây; kết nối im lặng một phút sẽ bị đóng.
+
+**Kết quả vừa đủ.** Kết quả là JSON gọn. Quá khoảng 20K token (`FIGMA_BRIDGE_MAX_TOKENS`) thì danh sách dài nhất bị cắt đôi dần cho tới khi vừa, và `note` ở đầu nói phần nào bị bỏ và cách lấy tiếp (node_id, offset…). Link figma.com và id dạng `12-34` dùng được ở mọi chỗ cần node id; link còn chọn luôn file.
 
 ---
 
@@ -498,7 +534,8 @@ figma-plugin/code.js   (luồng chính của plugin: chạy lệnh bằng Figma 
 | *"Reading team libraries needs the teamlibrary permission"* | Như trên: chạy lại plugin để Figma đọc `manifest.json` mới. |
 | *"macOS did not let Claude access …"* (khi chèn ảnh hay export) | Cho phép Claude trong System Settings → Privacy & Security → Files and Folders, hoặc dùng thư mục nằm ngay trong thư mục home. |
 | Trên page còn sót hình chữ nhật *"Claude capture (temporary)"* | Một lần chụp màn hình bị ngắt giữa chừng. Xoá nó đi; plugin cũng tự dọn khi khởi động. |
-| `run_code` bị timeout | Chia nhỏ việc hoặc dùng cách chạy nền ở mục [Viết `run_code` cho tốt](#viết-run_code-cho-tốt). Kiểm tra thêm Figma có đang hiện hộp thoại nào không. |
+| `run_code` bị timeout | Chia nhỏ việc hoặc dùng cách chạy nền ở mục [Viết `run_code` cho tốt](#viết-run_code-cho-tốt). Kiểm tra thêm Figma có đang hiện hộp thoại nào không. Lệnh sửa bị timeout có thể vẫn chạy xong: lần trả lời sau sẽ báo. |
+| Claude báo *"Changes are paused in the Claude Bridge window"* | **Allow changes** đang tắt trong cửa sổ plugin của file đó. Bật lại là được. |
 | Lỗi text kiểu *"unloaded font"* | Load đúng family và style trước. Dùng `figma.listAvailableFontsAsync()` để xem máy có font nào. |
 | Claude không thấy công cụ | Claude desktop: vào **Settings → Developer** xem `figma-bridge` có báo lỗi không. Claude Code: chạy `claude mcp list` và `/mcp`. Thử chạy server bằng tay: `node server/index.js` (Ctrl+C để tắt). |
 
@@ -516,7 +553,9 @@ Log ghi ra stderr với tiền tố `[figma-bridge]`. stdout dành riêng cho MC
 ## An toàn
 
 - Server chỉ nghe trên `127.0.0.1` và `::1`, máy khác trong mạng không truy cập được.
-- Trang web cũng không dùng được: trình duyệt luôn gửi header `Origin` khi mở WebSocket, còn server chỉ nhận cửa sổ plugin (origin `null` hoặc `figma.com`) và các bản server khác (không có origin).
+- Trang web cũng không dùng được: trình duyệt luôn gửi header `Origin` khi mở WebSocket, còn server chỉ nhận cửa sổ plugin (origin `null` hoặc `figma.com`) và các bản server khác (không có origin). Header `Host` phải là tên của chính máy này (`localhost`, `127.0.0.1`, `[::1]`), chặn kiểu tấn công DNS rebinding.
+- Chỉ nhận câu trả lời từ đúng file đã nhận lệnh, id lệnh ngẫu nhiên, kết nối phải tự giới thiệu trong 10 giây, và mỗi tin nhắn tối đa 256 MB.
+- File export luôn nằm trong thư mục Claude được giao, dù layer tên là gì.
 - Manifest của plugin chỉ cho phép kết nối tới `localhost:3055` (`devAllowedDomains`). Plugin không ra được internet.
 - `run_code` cho Claude chạy **bất kỳ** code Plugin API nào trong file đang mở: đọc, sửa hay xoá layer. Chỉ dùng bridge trên file bạn yên tâm cho Claude sửa, giữ version history, và đóng plugin khi xong việc.
 - `place_image` đọc file ảnh hoặc link được giao, `export_nodes` ghi file vào thư mục được giao. Cả hai chạy với quyền của user trên máy bạn, và chỉ khi Claude gọi.
@@ -544,9 +583,10 @@ claude-to-figma/
 ├── figma-plugin/
 │   ├── manifest.json        Manifest plugin (dynamic-page, teamlibrary, chỉ kết nối localhost)
 │   ├── code.js              Luồng chính: chạy lệnh bằng Plugin API, giữ nhật ký thao tác
-│   └── ui.html              Cửa sổ plugin: WebSocket client + trạng thái và log
+│   └── ui.html              Cửa sổ plugin: WebSocket client, dòng thời gian có nút Show, Allow changes, đổi kích thước
 ├── install-mac.sh           Script cài cho Claude desktop trên macOS
 ├── test/
+│   ├── smoke.test.js        Server khởi động và liệt kê tool (chạy được trên Node 18)
 │   ├── plugin.test.js       Handler của code.js trên mock Figma API chặt chẽ (variable, library, viewport, nhật ký…)
 │   ├── server.test.js       Tool và prompt MCP, nhiều file, dữ liệu lớn, chèn ảnh và export
 │   ├── multi.test.js        Hub + relay, chuyển hub, hai file qua relay, phát hiện bản cũ
@@ -567,18 +607,19 @@ Test dùng cổng 3997–3999 nên không đụng tới bridge đang chạy trê
 
 ```jsonc
 // plugin → server, khi vừa kết nối
-{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.3.0", "session": "…" } }
+{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.4.0", "session": "…" } }
 // plugin → server, trong lúc mở
-{ "type": "info", "info": { "page": "…" } }          // đổi page
+{ "type": "info", "info": { "page": "…" } }          // đổi page (hoặc { "paused": true })
 { "type": "activity", "what": "select" }               // người dùng vừa thao tác ở file này (tối đa 1 lần/giây)
 // server → plugin
-{ "id": 7, "command": "run_code", "params": { "code": "return 1" } }
+{ "id": "6f1c…", "command": "run_code", "params": { "code": "return 1" }, "deadline": 1760000000000 }   // deadline: chỉ lệnh sửa
 // plugin → server
-{ "type": "result", "id": 7, "ok": true, "result": { "value": 1, "logs": [] } }
-{ "type": "result", "id": 7, "ok": false, "error": "message" }
+{ "type": "result", "id": "6f1c…", "ok": true, "result": { "value": 1, "logs": [] } }
+{ "type": "result", "id": "6f1c…", "ok": false, "error": "message" }
+// luồng chính → cửa sổ plugin (không gửi lên server): { "type": "done", "rid", "summary", "touched", "ms", "write" }
 ```
 
-Relay nối vào `ws://127.0.0.1:<port>/relay`, gửi `{ type: "call", id, command, params, timeout, target?, write? }` hoặc `{ type: "status", id }`, và nhận về `{ type: "reply", id, ok, result | error, file?, files? }`.
+Relay nối vào `ws://127.0.0.1:<port>/relay`, gửi `{ type: "call", id, command, params, timeout, target?, write? }` hoặc `{ type: "status", id }`, và nhận về `{ type: "reply", id, ok, result | error, file?, files?, notes? }`.
 
 **Thêm lệnh mới:**
 
@@ -586,4 +627,6 @@ Relay nối vào `ws://127.0.0.1:<port>/relay`, gửi `{ type: "call", id, comma
 2. Thêm tool vào `TOOLS` trong `server/index.js`, gọi `callPlugin("<command>", params, timeout, a.file, write)`.
 3. Viết test trong `test/plugin.test.js`.
 
-**Phát hành bản mới:** tăng `VERSION` trong `server/index.js` và `version` trong `package.json` cùng lúc. Relay dựa vào chuỗi phiên bản của hub để nhận ra bridge cũ.
+**Phát hành bản mới:** tăng `VERSION` trong `server/index.js`, `VERSION` trong `figma-plugin/code.js` và `version` trong `package.json` cùng lúc. Relay dựa vào chuỗi phiên bản của hub để nhận ra bridge cũ.
+
+**Ghi công.** Một số ý tưởng của bản 1.4 (đọc thiết kế sâu để viết code, bảng hoạt động có nút Show, làm chắc đường truyền) lấy cảm hứng từ [figwright](https://github.com/awdr74100/figwright) (MIT, © Roya); code ở đây được viết riêng cho dự án này.
