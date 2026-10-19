@@ -25,9 +25,10 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const pathMod = require("path");
+const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const log = (...a) => process.stderr.write("[figma-bridge] " + a.join(" ") + "\n");
 
 /* ---------------- WebSocket framing (RFC 6455, minimal) ---------------- */
@@ -133,6 +134,15 @@ const late = new Map();       // command id -> { command, at, key }
 const lateNotes = new Map();  // file identity -> [notes]
 const recentDrops = new Map();// file identity -> { at, label }: a file whose plugin dropped without closing (reconnecting)
 const MAYBE_APPLIED = " If this was a change, it may still have been applied in Figma: check with get_context (recent activity) or a screenshot before trying again, so nothing is done twice.";
+/* Long calls: MCP clients give up on a call after about a minute (Cowork sooner) and a retried change
+   would then run twice. A call still running after SOFT_MS answers with a job id instead (see `job`). */
+const SOFT_MS = Math.max(500, parseInt(process.env.FIGMA_BRIDGE_SOFT_MS || "45000", 10) || 45000);
+const ASK_MS = Math.max(5000, parseInt(process.env.FIGMA_BRIDGE_ASK_MS || "300000", 10) || 300000);   // how long a change may wait for the user's OK
+const callCtx = new AsyncLocalStorage();
+/* which Claude window sent a command: shown in the plugin's timeline when several are at work */
+const TAG = (process.pid % 1296).toString(36).padStart(2, "0");
+let BY = "Claude ·" + TAG;
+function setClient(info) { BY = (/code/i.test(String(info && info.name || "")) ? "Claude Code" : "Claude") + " ·" + TAG; }
 function newId() { return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex"); }
 function clipStr(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
 
@@ -203,13 +213,16 @@ function hubStatus() {
   const list = byRecent(livePlugins());
   return { connected: list.length > 0, info: list.length ? list[0].info : null, files: filesSummary(), version: VERSION };
 }
-function hubCallPlugin(command, params, timeout, target, write) {
+/* opts: by (which Claude window, shown in the plugin's timeline), onSent(id), onProgress(msg) */
+function hubCallPlugin(command, params, timeout, target, write, opts) {
+  opts = opts || {};
   return new Promise((resolve, reject) => {
     let p;
     try { p = pickPlugin(target, write); } catch (e) { return reject(e); }
+    if (write && p.info.ask) timeout = Math.max(timeout, ASK_MS);   // Ask first: the change waits for the user's OK in Figma
     const id = newId(), at = Date.now();
     const entry = {
-      plugin: p, command: command, write: !!write,
+      plugin: p, command: command, write: !!write, onProgress: opts.onProgress,
       resolve: (v) => { clearTimeout(timer); clearTimeout(entry.grace); const q = entry.plugin; resolve({ result: v, file: fileLabel(q), files: distinctFiles(livePlugins()), notes: takeNotes(identity(q)) }); },
       reject: (e) => { clearTimeout(timer); clearTimeout(entry.grace); reject(e); }
     };
@@ -223,8 +236,15 @@ function hubCallPlugin(command, params, timeout, target, write) {
     pending.set(id, entry);
     const msg = { id: id, command: command, params: params || {} };
     if (write) msg.deadline = at + timeout - 500;   // a change still queued in Figma when Claude stops waiting is dropped
+    if (opts.by) msg.by = opts.by;
+    if (opts.onSent) opts.onSent(id);
     p.conn.send(msg);
   });
+}
+/* Ask the plugin to drop a change that hasn't started (queued, or waiting for the user's OK) or to stop a running one at its next step. */
+function cancelHubCommand(id, by) {
+  const pd = pending.get(id);
+  if (pd && pd.plugin && pd.plugin.conn.alive) pd.plugin.conn.send({ type: "cancel", rid: id, by: by || "claude" });
 }
 const HELLO_MS = parseInt(process.env.FIGMA_BRIDGE_HELLO_MS || "10000", 10);   // a plugin says who it is right away
 function acceptPlugin(socket, head) {
@@ -252,6 +272,11 @@ function acceptPlugin(socket, head) {
       }
       if (msg.type === "info") { Object.assign(entry.info, msg.info || {}); return; }
       if (msg.type === "activity") { entry.lastActive = Date.now(); return; }
+      if (msg.type === "progress") {   // queued / asking / running 12 of 40 (by rid: a 1.4 hub ignores messages without id)
+        const pd = pending.get(msg.rid);
+        if (pd && pd.plugin === entry && pd.onProgress) pd.onProgress(msg);
+        return;
+      }
       if (msg.id === undefined) return;
       const pd = pending.get(msg.id);
       if (pd) {
@@ -313,17 +338,24 @@ function onUpgrade(req, socket, head) {
   socket.setNoDelay(true);
   if (isRelay) {
     /* another Claude process relaying its tool calls through us */
+    const sentFor = new Map();   // the relay's call id -> the command id sent to the plugin
     const relay = makeConn(socket, {
       head: head,
       onMessage: async (m) => {
         if (m.type === "status") return relay.send({ type: "reply", id: m.id, ok: true, result: hubStatus() });
+        if (m.type === "cancel") { if (sentFor.has(m.id)) cancelHubCommand(sentFor.get(m.id), "claude"); return; }
         if (m.type !== "call") return;
         try {
           // relays from 1.1 don't say whether a call changes the file: judge by the command
           const write = m.write !== undefined ? !!m.write : (WRITE_COMMANDS.has(m.command) || (m.command === "set_page" && !!(m.params && m.params.create)));
-          const r = await hubCallPlugin(m.command, m.params, m.timeout || 60000, m.target, write);
+          const r = await hubCallPlugin(m.command, m.params, m.timeout || 60000, m.target, write, {
+            by: m.by,
+            onSent: (id) => sentFor.set(m.id, id),
+            onProgress: (pm) => relay.send({ type: "progress", id: m.id, state: pm.state, done: pm.done, total: pm.total, text: pm.text })
+          });
           relay.send({ type: "reply", id: m.id, ok: true, result: r.result, file: r.file, files: r.files, notes: r.notes });
         } catch (e) { relay.send({ type: "reply", id: m.id, ok: false, error: e.message }); }
+        finally { sentFor.delete(m.id); }
       },
       onClose: () => log("relay disconnected")
     });
@@ -380,6 +412,7 @@ function connectRelay() {
       const link = makeConn(socket, {
         head: head, mask: true,
         onMessage: (m) => {
+          if (m.type === "progress") { const p = pending.get(m.id); if (p && p.onProgress) p.onProgress(m); return; }
           if (m.type !== "reply" || !pending.has(m.id)) return;
           const p = pending.get(m.id); pending.delete(m.id);
           if (m.ok) p.resolve(m); else p.reject(new Error(m.error || "Figma reported an error."));
@@ -396,13 +429,17 @@ function connectRelay() {
   });
 }
 /* Resolves with the hub's whole reply message ({result, file, files}). */
-function relayCall(type, command, params, timeout, target, write) {
+function relayCall(type, command, params, timeout, target, write, opts) {
+  opts = opts || {};
   return new Promise((resolve, reject) => {
     if (!hubLink) return reject(new Error("Not connected to the bridge hub yet."));
-    const id = ++seq;
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error("Timed out after " + Math.round(timeout / 1000) + "s waiting for Figma (" + (command || type) + ")." + (write ? MAYBE_APPLIED : ""))); }, timeout + 2000);
-    pending.set(id, { write: !!write, resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
-    hubLink.send({ type: type, id: id, command: command, params: params || {}, timeout: timeout, target: target, write: write || undefined });
+    const id = ++seq, link = hubLink;
+    // the hub times the call out itself (and gives a change in Ask first mode longer); this is only a safety net
+    const wait = (write ? Math.max(timeout, ASK_MS) : timeout) + 2000;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error("Timed out after " + Math.round(wait / 1000) + "s waiting for Figma (" + (command || type) + ")." + (write ? MAYBE_APPLIED : ""))); }, wait);
+    pending.set(id, { write: !!write, onProgress: opts.onProgress, resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
+    link.send({ type: type, id: id, command: command, params: params || {}, timeout: timeout, target: target, write: write || undefined, by: opts.by });
+    if (opts.onSent) opts.onSent(id, link);
   });
 }
 
@@ -432,15 +469,19 @@ ensureRole();
 async function callPlugin(command, params, timeoutMs, target, write) {
   const timeout = timeoutMs || 60000;
   await ensureRole();
+  /* the tool call this belongs to (see callTool): it can cancel what it sent and shows progress */
+  const cx = callCtx.getStore();
+  const opts = { by: BY };
+  if (cx) opts.onProgress = (pm) => { cx.progress = { state: pm.state, done: pm.done, total: pm.total, text: pm.text }; };
   try {
-    if (role === "hub") return await hubCallPlugin(command, params, timeout, target, write);
+    if (role === "hub") return await hubCallPlugin(command, params, timeout, target, write, Object.assign({ onSent: cx ? (id) => cx.sent.push({ hub: id }) : null }, opts));
     if (role === "relay") {
       if (target && hubVersion && older(hubVersion, "1.2.0")) {
         // a 1.1 hub ignores `file` and talks to one file only: make sure it's the one asked for
         const who = (await relayCall("call", "ping", {}, 8000)).result || {};
         if (!fileMatches(target, who)) throw new Error(`The bridge running now is an older version (${hubVersion}) that can only reach one Figma file, "${who.file}", not "${target}". Quit Claude completely (Cmd+Q) and open it again to finish updating; then several files work at once.`);
       }
-      const m = await relayCall("call", command, params, timeout, target, write);
+      const m = await relayCall("call", command, params, timeout, target, write, Object.assign({ onSent: cx ? (id, link) => cx.sent.push({ relay: id, link: link }) : null }, opts));
       return { result: m.result, file: m.file, files: m.files, notes: m.notes };
     }
   } catch (e) {
@@ -508,17 +549,19 @@ const RUN_CODE_HELP = [
   "Runs JavaScript with the Figma Plugin API in the user's open file and returns the result. The code is the BODY of an async function with:",
   "  figma — the API (dynamic-page: use the *Async calls, e.g. await figma.getNodeByIdAsync(id), await page.loadAsync(), node.getMainComponentAsync(), node.setFillStyleIdAsync()).",
   "  log(...args) — debug output, returned as logs.",
-  "  h — helpers: h.solid('#RRGGBB', opacity?) → paints, h.hex(), h.color('#RRGGBBAA'), h.toHex(color), await h.font(family, style), h.svg(markup, width?) → node, h.summary(node, depth?), await h.describe(node), await h.variable('color/brand') → Variable (local or library), await h.bind(node, 'fill', 'color/brand'), await h.shader(node, {name, properties}).",
+  "  h — helpers: h.solid('#RRGGBB', opacity?) → paints, h.hex(), h.color('#RRGGBBAA'), h.toHex(color), await h.font(family, style), h.svg(markup, width?) → node, h.summary(node, depth?), await h.describe(node), await h.variable('color/brand') → Variable (local or library), await h.bind(node, 'fill', 'color/brand'), await h.shader(node, {name, properties}), h.progress(done, total, text) in long loops (the user sees it and can cancel: it throws then).",
   "`return value` sends data back (nodes as {id,name,type,…}). Load fonts before setting text. globalThis persists while the plugin is open.",
   "Each call is one Cmd+Z; before risky edits: await figma.saveVersionHistoryAsync('Before …'). Never call figma.closePlugin(). Check drawings with screenshot."
 ].join("\n");
 
 const FILE_PROP = { type: "string", description: "Figma file name or link (needed for changes when several are open)." };
+const SINCE_PROP = { type: "string", description: "An earlier etag: returns {unchanged: true} if nothing changed." };
+const LOOK_PROP = { type: "boolean", description: "Also return a picture of the result." };
 const VAR_REF = "a variable name like 'color/brand/primary', '{name}', a 'VariableID:…' id, {key: '…'} for a library variable, or null to unbind";
 
 const TOOLS = [
   {
-    name: "status",
+    name: "status", direct: true,
     description: "Check whether the Figma plugin is connected, which file and page are open, and (when several files have Claude Bridge open) which ones.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     run: async (a) => {
@@ -535,25 +578,49 @@ const TOOLS = [
       if (!info.version || older(info.version, VERSION)) notes.push("The Claude Bridge plugin in Figma is older than this bridge (" + VERSION + "): close it in Figma and run it again (Plugins → Development → Claude Bridge).");
       else if (older(VERSION, info.version)) notes.push("The Claude Bridge plugin (" + info.version + ") is newer than this bridge (" + VERSION + "): quit Claude completely (Cmd+Q) and open it again so the new tools load.");
       if (older(hubV, VERSION)) notes.push("Another Claude window started an older bridge (" + hubV + ") that still owns port " + PORT + ". Quit Claude completely (Cmd+Q) and open it again to finish updating; until then working with several files at once is off.");
-      if (info.paused) { res.paused = true; notes.push('Changes are paused in the Claude Bridge window of "' + info.file + '": Claude can look but not change this file until the user switches "Allow changes" back on.'); }
+      if (info.paused) { res.paused = true; notes.push('The Claude Bridge window of "' + info.file + '" is set to Look only: Claude can look but not change this file until the user switches it to Allow changes or Ask first.'); }
+      else if (info.ask) { res.ask_first = true; notes.push('The Claude Bridge window of "' + info.file + '" is set to Ask first: each change waits for the user\'s OK in Figma (they see what it will do), so say what you are about to change.'); }
       if (lateList) lateList.forEach((n) => notes.push(n));
       if (notes.length) res.notes = notes;
       return text(JSON.stringify(res, null, 2));
     }
   },
   {
+    name: "job", direct: true,
+    description: "Calls running over ~45 s answer with a job id. job {id} waits for it (wait seconds) and returns the result; cancel: true drops a change not applied yet or stops a running one at its next step. No id: recent jobs.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" }, wait: { type: "number", description: "Default 40, max 45." }, cancel: { type: "boolean" } },
+      additionalProperties: false
+    },
+    run: async (a) => {
+      if (!a.id) return text(JSON.stringify({ jobs: Array.from(jobs.values()).slice(-10).map((c) => Object.assign(jobInfo(c), c.seen ? { result: "returned" } : {})) }));
+      const call = jobs.get(String(a.id).trim());
+      if (!call) throw new Error('No job "' + a.id + '" in this Claude window (jobs are kept 30 minutes). get_context (recent activity) shows whether a change landed.');
+      if (a.cancel && !call.done) {
+        cancelCall(call);
+        if (await within(call.promise, 5000) === TIMEOUT) return text(JSON.stringify(Object.assign(jobInfo(call), { next: "Asked Figma to stop it. Call job again to see how it ended." })));
+      }
+      const waitMs = Math.min(Math.max(0, a.wait === undefined ? 40 : Number(a.wait) || 0) * 1000, SOFT_MS);
+      const r = call.done ? call.result : await within(call.promise, waitMs);
+      if (r === TIMEOUT) return jobReply(call);
+      seen(call);
+      return prefixed(r, "[Job " + call.jid + " (" + call.tool + ") finished after " + ago(call.ended - call.started) + ".]");
+    }
+  },
+  {
     name: "get_context",
     description: [
       "What the user is looking at and working on in Figma right now. Call this first when the user says \"this\", \"here\", \"what I selected\" or \"what I'm working on\".",
-      "Returns: file and page; the selection (and the text range if they are editing text); the viewport, i.e. the area of the canvas on their screen: zoom, bounds, the frame in focus (centre of the screen) and the layers in view; and recent activity in this file (what was selected, edited, created or deleted, by the user, a collaborator or Claude, and when).",
+      "Returns: file and page; the selection (and the text range being edited); the viewport (zoom, bounds, the frame in focus at the centre of the screen, the layers in view); and recent activity in this file (selected, edited, created or deleted, by the user, a collaborator or Claude, and when).",
       "Use get_selection for full details of the selected layers and screenshot (no arguments) to see the screen."
     ].join(" "),
     inputSchema: {
       type: "object",
       properties: {
-        activity: { type: "number", description: "How many recent activity events to include (default 15, 0 for none)." },
+        activity: { type: "number", description: "Recent events to include (default 15)." },
         since_seconds: { type: "number", description: "Only include activity from the last N seconds." },
-        depth: { type: "number", description: "How deep to list the layers in view (default 2: top-level layers and their children)." },
+        depth: { type: "number", description: "Levels of layers in view to list (default 2)." },
         max_layers: { type: "number", description: "Cap on listed layers in view (default 60)." }
       },
       additionalProperties: false
@@ -562,16 +629,17 @@ const TOOLS = [
   },
   {
     name: "get_selection",
-    description: "Full details of what the user has selected in Figma: for each layer its id, path, position and size, fills and strokes (hex), radius, effects, auto layout and sizing, text and typography, applied styles, bound variables, variable modes, and component info (main component, variant, key, library or local, component property values). Also the text range when they are editing text, and the colours used in the selection. depth sets how many child levels to summarise (default 1).",
+    description: "Full details of the layers the user has selected: id, path, position and size, fills and strokes (hex), radius, effects, auto layout and sizing, text and typography, styles, bound variables, modes, and component info (main component, variant, key, library or local, property values); also the text range being edited and the colours used.",
     inputSchema: {
       type: "object",
       properties: {
         depth: { type: "number", description: "Child depth, default 1." },
-        brief: { type: "boolean", description: "Only ids, names, types and sizes." }
+        brief: { type: "boolean", description: "Only ids, names, types and sizes." },
+        since: SINCE_PROP
       },
       additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("get_selection", { depth: a.depth, brief: a.brief }, 60000, a.file, false), "get_selection")
+    run: async (a) => reply(await callPlugin("get_selection", { depth: a.depth, brief: a.brief }, 60000, a.file, false), "get_selection", a)
   },
   {
     name: "get_spec",
@@ -590,11 +658,12 @@ const TOOLS = [
         max_nodes: { type: "number", description: "Above this many layers, return a plan of sections instead (default 350)." },
         force: { type: "boolean", description: "Read everything even when it's big." },
         include_hidden: { type: "boolean" },
-        dedupe: { type: "boolean", description: "List repeated identical instances once (default true)." }
+        dedupe: { type: "boolean", description: "List repeated identical instances once (default true)." },
+        since: SINCE_PROP
       },
       additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("get_spec", { node_id: a.node_id, ids: a.ids, depth: a.depth, max_nodes: a.max_nodes, force: a.force, include_hidden: a.include_hidden, dedupe: a.dedupe }, 120000, a.file, false), "get_spec")
+    run: async (a) => reply(await callPlugin("get_spec", { node_id: a.node_id, ids: a.ids, depth: a.depth, max_nodes: a.max_nodes, force: a.force, include_hidden: a.include_hidden, dedupe: a.dedupe }, 120000, a.file, false), "get_spec", a)
   },
   {
     name: "screenshot",
@@ -624,10 +693,10 @@ const TOOLS = [
     description: "Describe the layer tree of a node, or of the current page if no id is given.",
     inputSchema: {
       type: "object",
-      properties: { node_id: { type: "string" }, depth: { type: "number", description: "Child depth, default 2." }, max_nodes: { type: "number", description: "Most layers to list, level by level (default 400)." } },
+      properties: { node_id: { type: "string" }, depth: { type: "number", description: "Child depth, default 2." }, max_nodes: { type: "number", description: "Most layers to list, level by level (default 400)." }, since: SINCE_PROP },
       additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("get_tree", { node_id: a.node_id, depth: a.depth, max_nodes: a.max_nodes }, 60000, a.file, false), "get_tree")
+    run: async (a) => reply(await callPlugin("get_tree", { node_id: a.node_id, depth: a.depth, max_nodes: a.max_nodes }, 60000, a.file, false), "get_tree", a)
   },
   {
     name: "list_pages",
@@ -652,11 +721,10 @@ const TOOLS = [
       type: "object",
       properties: {
         code: { type: "string", description: "Body of an async JS function. Use `return` to send back a value." },
-        timeout_ms: { type: "number", description: "Max time to wait, default 60000." }
-      },
+        timeout_ms: { type: "number", description: "Max time to wait, default 60000." }, look: LOOK_PROP },
       required: ["code"], additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("run_code", { code: a.code }, a.timeout_ms || 60000, a.file, true), "run_code")
+    run: async (a) => reply(await callPlugin("run_code", { code: a.code, look: a.look }, a.timeout_ms || 60000, a.file, true), "run_code")
   },
   {
     name: "build",
@@ -677,11 +745,10 @@ const TOOLS = [
       properties: {
         spec: { description: "Node spec object or array of specs.", anyOf: [{ type: "object" }, { type: "array", items: { type: "object" } }] },
         parent_id: { type: "string", description: "Parent node id. Defaults to the current page." },
-        position: { type: "string", enum: ["auto", "viewport", "origin"], description: "Where new top-level layers go without x/y: auto (default) right of the selection or the frame on screen, overlapping nothing; viewport = middle of the screen; origin = 0,0." }
-      },
+        position: { type: "string", enum: ["auto", "viewport", "origin"], description: "Where new top-level layers go without x/y: auto (default) right of the selection or the frame on screen, overlapping nothing; viewport = middle of the screen; origin = 0,0." }, look: LOOK_PROP },
       required: ["spec"], additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("build", { spec: a.spec, parent_id: a.parent_id, position: a.position }, 120000, a.file, true), "build")
+    run: async (a) => reply(await callPlugin("build", { spec: a.spec, parent_id: a.parent_id, position: a.position, look: a.look }, 120000, a.file, true), "build")
   },
   {
     name: "delete_nodes",
@@ -709,11 +776,12 @@ const TOOLS = [
         component: { type: "string" },
         visible_only: { type: "boolean" },
         limit: { type: "number", description: "Default 200." },
-        offset: { type: "number", description: "Skip this many matches (next_offset from the last call)." }
+        offset: { type: "number", description: "Skip this many matches (next_offset from the last call)." },
+        since: SINCE_PROP
       },
       additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("find_nodes", { scope: a.scope, node_id: a.node_id, type: a.type, name: a.name, text: a.text, component: a.component, visible_only: a.visible_only, limit: a.limit, offset: a.offset }, 120000, a.file, false), "find_nodes")
+    run: async (a) => reply(await callPlugin("find_nodes", { scope: a.scope, node_id: a.node_id, type: a.type, name: a.name, text: a.text, component: a.component, visible_only: a.visible_only, limit: a.limit, offset: a.offset }, 120000, a.file, false), "find_nodes", a)
   },
   {
     name: "update_nodes",
@@ -733,16 +801,15 @@ const TOOLS = [
       type: "object",
       properties: {
         items: { type: "array", items: { type: "object" } },
-        save_version: { type: "string" }
-      },
+        save_version: { type: "string" }, look: LOOK_PROP },
       required: ["items"], additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("update_nodes", { items: a.items, save_version: a.save_version }, 180000, a.file, true), "update_nodes")
+    run: async (a) => reply(await callPlugin("update_nodes", { items: a.items, save_version: a.save_version, look: a.look }, 180000, a.file, true), "update_nodes")
   },
   {
     name: "audit_design",
     description: [
-      "Check a design for polish and design-system problems, like Figma's \"Check designs\" and \"Tidy and polish\". Checks: names (default layer names like 'Frame 12'), bind (hard-coded values that match a variable), colors (hard-coded colours outside the variables and styles), text (text without a text style), pixels (positions/sizes off whole pixels), spacing (auto layout gaps/padding off the grid), contrast (text contrast below WCAG AA), targets (tappable layers under 44×44), hidden, empty, autolayout (frames that could use auto layout).",
+      "Check a design for polish and design-system problems. Checks: names (default layer names like 'Frame 12'), bind (hard-coded values that match a variable), colors (hard-coded colours outside the variables and styles), text (text without a text style), pixels (positions/sizes off whole pixels), spacing (auto layout gaps/padding off the grid), contrast (text contrast below WCAG AA), targets (tappable layers under 44×44), overflow (text running out of its box, layers sticking out of their auto layout frame or cut off), hidden, empty, autolayout (frames that could use auto layout).",
       "Scope: node_id, or scope 'selection' | 'page' (default: the selection, else the page). fix: ['bind', 'round', 'autolayout'] applies those safe fixes (one undo step); renames and colour choices are yours to make with update_nodes."
     ].join(" "),
     inputSchema: {
@@ -750,7 +817,7 @@ const TOOLS = [
       properties: {
         node_id: { type: "string" },
         scope: { type: "string", enum: ["selection", "page", "file"] },
-        checks: { type: "array", items: { type: "string", enum: ["names", "bind", "colors", "text", "pixels", "spacing", "contrast", "targets", "hidden", "empty", "autolayout"] } },
+        checks: { type: "array", items: { type: "string", enum: ["names", "bind", "colors", "text", "pixels", "spacing", "contrast", "targets", "overflow", "hidden", "empty", "autolayout"] } },
         fix: { type: "array", items: { type: "string", enum: ["bind", "round", "autolayout"] } },
         grid: { type: "number", description: "Spacing grid in px (default 4)." },
         limit: { type: "number", description: "Max issues listed (default 150)." }
@@ -761,7 +828,7 @@ const TOOLS = [
   },
   {
     name: "place_image",
-    description: "Put an image into Figma from a file on this computer (e.g. '~/Pictures/dog.jpg'), an https:// link or a data: URL. PNG, JPEG and GIF become an image fill: on node_id (replacing its fills, or add=true to add on top) or on a new rectangle (inside parent_id at x/y, or beside the user's work; width/height default to the image size, keeping its ratio). SVG files become vector layers. scale_mode: FILL (default), FIT, CROP or TILE.",
+    description: "Put an image into Figma from a file on this computer (e.g. '~/Pictures/dog.jpg'), an https:// link or a data: URL. PNG, JPEG and GIF become an image fill: on node_id (replacing its fills, or add=true to add on top) or on a new rectangle (inside parent_id at x/y, or beside the user's work; width/height default to the image size, keeping its ratio). SVG files become vector layers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -827,7 +894,7 @@ const TOOLS = [
     description: [
       "List the variables of the open file: each local collection with its modes, and every variable's type and value per mode (colours as hex, aliases as {other/name}), scopes, code syntax and description.",
       "Filter with collection, query (part of the name) and type.",
-      "library=true also lists the variable collections of the libraries enabled in this file (name, type and key of each variable). Library variables are read-only here: bind them by name or import them by key; to change them, open the library file and run Claude Bridge there."
+      "library=true also lists the variable collections of the libraries enabled in this file (name, type and key of each variable): read-only here, bind them by name or import them by key."
     ].join(" "),
     inputSchema: {
       type: "object",
@@ -839,11 +906,12 @@ const TOOLS = [
         values: { type: "boolean", description: "Include values (default true)." },
         ids: { type: "boolean", description: "Include variable and collection ids." },
         limit: { type: "number", description: "Max variables listed (default 500)." },
-        offset: { type: "number", description: "Skip this many (next_offset from the last call)." }
+        offset: { type: "number", description: "Skip this many (next_offset from the last call)." },
+        since: SINCE_PROP
       },
       additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("get_variables", { collection: a.collection, query: a.query, type: a.type, library: a.library, values: a.values, ids: a.ids, limit: a.limit, offset: a.offset }, 60000, a.file, false), "get_variables")
+    run: async (a) => reply(await callPlugin("get_variables", { collection: a.collection, query: a.query, type: a.type, library: a.library, values: a.values, ids: a.ids, limit: a.limit, offset: a.offset }, 60000, a.file, false), "get_variables", a)
   },
   {
     name: "set_variables",
@@ -855,8 +923,7 @@ const TOOLS = [
       "{op:'set', collection, name, type?:'COLOR'|'FLOAT'|'STRING'|'BOOLEAN', values?:{'<mode name>'|'*': value}, value?: same value for every mode, description?, scopes?:['ALL_FILLS',…], code_syntax?:{WEB?, ANDROID?, iOS?}, hidden?: bool} — creates the variable when missing (type is inferred from the value), otherwise updates it",
       "{op:'rename', collection?, name, to} · {op:'delete', collection?, name}",
       "Values: '#RRGGBB' or '#RRGGBBAA' colours, numbers, strings, booleans, or an alias to another variable: '{color/blue/500}' or {alias:'color/blue/500', collection:'Primitives'} (library variables work too).",
-      "Variables that come from a library can't be changed here: open the library file and run Claude Bridge there, then the user publishes the library.",
-      "save_version: a title to save a restore point in version history before the batch."
+      "Library variables can't be changed here (see the instructions)."
     ].join("\n"),
     inputSchema: {
       type: "object",
@@ -901,11 +968,12 @@ const TOOLS = [
         kind: { type: "string", enum: ["all", "styles", "components", "variables", "shaders", "used"], description: "What to list (default all)." },
         query: { type: "string", description: "Only names containing this." },
         used_remote: { type: "boolean", description: "Also list library components used on the current page." },
-        limit: { type: "number", description: "Max items per list (default 300)." }
+        limit: { type: "number", description: "Max items per list (default 300)." },
+        since: SINCE_PROP
       },
       additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("get_library", { kind: a.kind, query: a.query, used_remote: a.used_remote, limit: a.limit }, 120000, a.file, false), "get_library")
+    run: async (a) => reply(await callPlugin("get_library", { kind: a.kind, query: a.query, used_remote: a.used_remote, limit: a.limit }, 120000, a.file, false), "get_library", a)
   },
   {
     name: "set_styles",
@@ -915,7 +983,7 @@ const TOOLS = [
       "{op:'set', type:'TEXT', name, font?:{family, style}, fontSize?, lineHeight?: number|'auto'|'150%', letterSpacing?: number|'2%', paragraphSpacing?, textCase?, textDecoration?, variables?:{fontSize:'type/size/m', …}, description?}",
       "{op:'set', type:'EFFECT', name, effects:[{type:'DROP_SHADOW', color:'#00000033', x:0, y:4, blur:12, spread:0}, {type:'LAYER_BLUR', blur:8}], description?}",
       "{op:'rename', type?, name, to} · {op:'delete', type?, name}",
-      "'set' creates the style when no local style has that name. save_version: a title to save a restore point first."
+      "'set' creates the style when no local style has that name."
     ].join("\n"),
     inputSchema: {
       type: "object",
@@ -1005,13 +1073,30 @@ function fitBudget(value, budget) {
   }
   return { value: v, cut: Array.from(cuts.entries()).map(([k, c]) => k + " shows " + c.kept + " of " + c.total) };
 }
-function reply(r, tool) {
+/* Reads answer with an etag; the same read with since: <etag> only says {unchanged: true} when nothing changed. */
+const ETAG_TOOLS = new Set(["get_selection", "get_spec", "get_tree", "find_nodes", "get_variables", "get_library"]);
+function etagOf(v) { return crypto.createHash("sha1").update(JSON.stringify(v === undefined ? null : v)).digest("base64").replace(/[^A-Za-z0-9]/g, "").slice(0, 10); }
+function reply(r, tool, a) {
   const head = (r && r.files > 1 && r.file ? "[Figma file: " + r.file + "]\n" : "") + notesText(r);
-  const fit = fitBudget(r ? r.result : null, MAX_TOKENS);
-  if (!fit.cut) return text(head + fit.str);
-  const note = "Shortened to fit Claude's context (about " + MAX_TOKENS + " tokens): " + fit.cut.join("; ") + ". To see the rest, " + (NARROW[tool] || "ask for less at a time") + ".";
-  const out = fit.value && typeof fit.value === "object" && !Array.isArray(fit.value) ? Object.assign({ note: note }, fit.value) : { note: note, result: fit.value };
-  return text(head + JSON.stringify(out));
+  let value = r ? r.result : null, pic = null;
+  if (value && typeof value === "object" && !Array.isArray(value) && value.look && value.look.base64) {   // look: true
+    pic = value.look;
+    value = Object.assign({}, value, { look: { width: pic.width, height: pic.height, of: pic.name } });
+  }
+  if (a && ETAG_TOOLS.has(tool)) {
+    const tag = etagOf(value);
+    if (a.since && String(a.since) === tag) return text(head + JSON.stringify({ unchanged: true, etag: tag }));
+    if (value && typeof value === "object" && !Array.isArray(value)) value = Object.assign({}, value, { etag: tag });
+  }
+  const fit = fitBudget(value, MAX_TOKENS);
+  let out;
+  if (!fit.cut) out = text(head + fit.str);
+  else {
+    const note = "Shortened to fit Claude's context (about " + MAX_TOKENS + " tokens): " + fit.cut.join("; ") + ". To see the rest, " + (NARROW[tool] || "ask for less at a time") + ".";
+    out = text(head + JSON.stringify(fit.value && typeof fit.value === "object" && !Array.isArray(fit.value) ? Object.assign({ note: note }, fit.value) : { note: note, result: fit.value }));
+  }
+  if (pic) out.content.push({ type: "image", data: pic.base64, mimeType: "image/png" });
+  return out;
 }
 
 /* MCP tool annotations: reads can be allowed once and for all, changes are marked as such. */
@@ -1025,14 +1110,15 @@ const ANNOTATIONS = {
   get_variables: ["Variables", READ], get_library: ["Styles, components and libraries", READ],
   set_page: ["Switch page", SAFE], focus: ["Select and zoom", SAFE], audit_design: ["Check and tidy", SAFE],
   build: ["Build layers", ADD], import_from_library: ["Import from library", ADD],
-  place_image: ["Place an image", { destructiveHint: true }], export_nodes: ["Export to files", { destructiveHint: false }],
+  place_image: ["Place an image", { destructiveHint: true }], export_nodes: ["Export to files", { destructiveHint: true, openWorldHint: false }],
+  job: ["Long-running calls", { destructiveHint: false, openWorldHint: false }],
   run_code: ["Run Plugin API code", EDIT], delete_nodes: ["Delete layers", EDIT], update_nodes: ["Change layers", EDIT],
   set_variables: ["Change variables", EDIT], bind_variables: ["Bind variables", EDIT], set_styles: ["Change styles", EDIT]
 };
 function listTools() {
   return TOOLS.map((t) => {
     const schema = JSON.parse(JSON.stringify(t.inputSchema));
-    schema.properties = Object.assign({}, schema.properties, { file: FILE_PROP });
+    if (t.name !== "job") schema.properties = Object.assign({}, schema.properties, { file: FILE_PROP });
     const out = { name: t.name, description: t.description, inputSchema: schema };
     const an = ANNOTATIONS[t.name];
     if (an) out.annotations = Object.assign({ title: an[0] }, an[1]);
@@ -1064,11 +1150,97 @@ function normalizeArgs(a) {
   return a;
 }
 
-async function callTool(name, args) {
+/* ---------------- long calls: jobs, the same call twice, cancel ----------------
+   A tool call still running after SOFT_MS answers with a job id; `job` waits for its result. The same
+   call (same tool and arguments) sent again while it runs, or before its result was seen, joins it
+   instead of doing the work twice. A cancelled MCP request cancels what it sent to Figma. */
+const calls = new Map();   // tool + arguments -> a call running now, or finished with its result not seen yet
+const jobs = new Map();    // job id -> call
+let jobSeq = 0;
+const TIMEOUT = Symbol("still running");
+function stable(v) {
+  if (Array.isArray(v)) return "[" + v.map(stable).join(",") + "]";
+  if (v && typeof v === "object") return "{" + Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + stable(v[k])).join(",") + "}";
+  return JSON.stringify(v === undefined ? null : v);
+}
+function within(promise, ms) {
+  let t;
+  return Promise.race([promise, new Promise((r) => { t = setTimeout(() => r(TIMEOUT), ms); })]).finally(() => clearTimeout(t));
+}
+async function runTool(tool, args) {
+  try { return await tool.run(args); }
+  catch (e) { return { content: [{ type: "text", text: "Error: " + (e && e.message ? e.message : String(e)) }], isError: true }; }
+}
+function nothingDone(res) { return !!(res && res.isError && /Nothing was changed/.test(res.content[0].text)); }
+function forget(call) { if (calls.get(call.key) === call) calls.delete(call.key); clearTimeout(call.expire); }
+function seen(call) { call.seen = true; if (call.done) forget(call); }
+function startCall(tool, args, key) {
+  const call = { key: key, tool: tool.name, started: Date.now(), ctx: { sent: [], progress: null }, waiters: 0, done: false, seen: false, result: null, jid: null };
+  calls.set(key, call);
+  call.promise = callCtx.run(call.ctx, () => runTool(tool, args)).then((res) => {
+    call.done = true; call.ended = Date.now(); call.result = res;
+    // a result nobody has seen waits a while for job or a retry; a change that didn't happen can just be sent again
+    if (call.seen || nothingDone(res)) forget(call);
+    else { call.expire = setTimeout(() => forget(call), 10 * 60000); call.expire.unref(); }
+    return res;
+  });
+  return call;
+}
+function cancelCall(call) {
+  for (const s of call.ctx.sent) {
+    if (s.hub !== undefined && pending.has(s.hub)) cancelHubCommand(s.hub, "claude");
+    else if (s.relay !== undefined && pending.has(s.relay) && s.link && s.link.alive) s.link.send({ type: "cancel", id: s.relay });
+  }
+}
+function stateOf(call) {
+  const st = call.ctx.progress && call.ctx.progress.state;
+  return call.done ? "done" : st === "asking" ? "waiting for the user's OK in Figma" : st === "queued" ? "queued behind another change" : st === "stopping" || st === "cancelled" ? "stopping" : "running";
+}
+function jobInfo(call) {
+  if (!call.jid) {
+    call.jid = "j" + (++jobSeq);
+    jobs.set(call.jid, call);
+    setTimeout(() => { if (jobs.get(call.jid) === call) jobs.delete(call.jid); }, 30 * 60000).unref();
+  }
+  const o = { job: call.jid, tool: call.tool, status: stateOf(call), time: ago((call.ended || Date.now()) - call.started) };
+  const p = call.ctx.progress;
+  if (p && p.total) o.progress = p.done + "/" + p.total + (p.text ? " " + p.text : "");
+  else if (p && p.text) o.progress = p.text;
+  return o;
+}
+function jobReply(call) {
+  const o = jobInfo(call);
+  o.next = "Still " + o.status + " in Figma. Call job with id \"" + o.job + "\" to wait for the result. Don't send this call again: a repeat would only join it.";
+  return text(JSON.stringify(o));
+}
+function prefixed(res, line) {
+  const out = Object.assign({}, res, { content: res.content.slice() });
+  const i = out.content.findIndex((c) => c.type === "text");
+  if (i >= 0) out.content[i] = { type: "text", text: line + "\n" + out.content[i].text };
+  else out.content.unshift({ type: "text", text: line });
+  return out;
+}
+async function callTool(name, args, req) {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) return { content: [{ type: "text", text: "Unknown tool: " + name }], isError: true };
-  try { return await tool.run(normalizeArgs(args)); }
-  catch (e) { return { content: [{ type: "text", text: "Error: " + (e && e.message ? e.message : String(e)) }], isError: true }; }
+  args = normalizeArgs(args);
+  if (tool.direct) return runTool(tool, args);
+  const key = name + " " + stable(args);
+  let call = calls.get(key), note = "";
+  if (call && call.done) {
+    seen(call);
+    return prefixed(call.result, "[Note: this same call already ran " + ago(Date.now() - call.ended) + " ago" + (call.jid ? " (job " + call.jid + ")" : "") + " and its answer hadn't been seen; here it is. Nothing was done again.]");
+  }
+  if (call) note = "[Note: the same call was already running" + (call.jid ? " as job " + call.jid : "") + "; this waited for it instead of doing it twice.]";
+  else call = startCall(tool, args, key);
+  if (req) req.call = call;
+  call.waiters++;
+  const res = await within(call.promise, SOFT_MS);
+  call.waiters--;
+  if (res === TIMEOUT) return jobReply(call);
+  if (req && req.cancelled) return res;   // never sent: the result stays for a retry
+  seen(call);
+  return note ? prefixed(res, note) : res;
 }
 
 
@@ -1113,9 +1285,9 @@ const PROMPTS = [
     text: (a) => [
       "Design this in Figma with my design system: " + (a.brief || "(ask me what to design)"),
       "1. get_context to see where I'm working; get_library (used_remote: true) and get_variables to learn the components, styles and tokens. If the brief refers to existing screens, screenshot them and match their style.",
-      "2. Build it with build (run_code for anything build can't express): use existing components as instances (component, variant, properties), bind colours, spacing and radii to variables with '{name}', use text styles, and fall back to raw values only when nothing fits. Build big screens section by section and screenshot each one. New screens land beside my current work by themselves.",
+      "2. Build it with build (run_code for anything build can't express): use existing components as instances (component, variant, properties), bind colours, spacing and radii to variables with '{name}', use text styles, and fall back to raw values only when nothing fits. Build big screens section by section with look: true to see each one. New screens land beside my current work by themselves.",
       "3. Use auto layout with hug/fill sizing rather than fixed sizes, so text can grow. For Vietnamese text: pick a font that has Vietnamese glyphs (Inter, Be Vietnam Pro, Roboto…), keep line height at about 1.3× the font size or more so stacked marks like \"ệ\" don't clip, and leave room: Vietnamese copy runs 20–30% longer than English.",
-      "4. Screenshot the result, check alignment, spacing, text overflow and contrast (audit_design), fix what's off, then focus on it so I see it."
+      "4. Check the result: alignment and spacing by eye, text that doesn't fit and contrast with audit_design (checks overflow, contrast); fix what's off, then focus on it so I see it."
     ]
   },
   {
@@ -1127,7 +1299,7 @@ const PROMPTS = [
       "1. find_nodes with type TEXT (scope 'selection', or node_id) to collect every text layer.",
       "2. Write the new copy for each one: keep meaning, numbers, names and placeholders, and keep it about as long as the original so the layout holds.",
       "3. Apply everything in one update_nodes batch ({id, text}).",
-      "4. Screenshot and fix overflow or awkward wrapping (shorter wording or textAutoResize)."
+      "4. Run audit_design with checks ['overflow'] on the changed screens, look at them (screenshot), and fix overflow or awkward wrapping (shorter wording or textAutoResize)."
     ]
   },
   {
@@ -1189,33 +1361,65 @@ const INSTRUCTIONS = [
   "Tools to work directly in the user's open Figma file through the Claude Bridge plugin. Call status first.",
   "To find out what the user means by \"this\" or \"here\", call get_context (selection, the area on their screen, recent activity), get_selection for full details, and screenshot with no arguments to see it.",
   "To write code from a design, use get_spec (deep, CSS-ready, with tokens and components) rather than get_selection.",
-  "Changes run one at a time in each file, each one Cmd+Z, and the user sees them in the Claude Bridge window. If a change times out it may still land: check before repeating it. If changes are paused there, ask the user to switch \"Allow changes\" back on.",
+  "Changes run one at a time in each file, each one Cmd+Z, and the user sees them in the Claude Bridge window. That window may be set to Ask first (the user approves each change) or Look only (no changes): status says so.",
+  "A call still running after about 45 s answers with a job id: get its result with job instead of sending the call again (a repeat only joins it). If a change timed out it may still land: check before repeating it.",
+  "Reads answer with an etag; pass it back as since to get just {unchanged: true} when nothing changed. build, update_nodes and run_code take look: true to return a picture of the result.",
   "Tidy and polish: audit_design (with fix for the safe fixes) and update_nodes for batch changes. Text: find_nodes, then update_nodes.",
   "Variables: get_variables, set_variables, bind_variables. Styles and components: get_library, set_styles, import_from_library. New designs: build with components, '{variable}' values and styles.",
   "Shaders: get_library kind 'shaders' lists them, update_nodes or build with shader applies them as a fill, stroke or effect. The Plugin API can't write new shaders.",
   "Files on this computer: place_image brings images in, export_nodes writes assets out.",
   "Library items (variables, styles, components from another file) are read-only in the files that use them: to change them, ask the user to open the library file and run Claude Bridge there, make the change in that file, then the user publishes the library update.",
-  "Prefer run_code for anything the other tools don't cover, then screenshot to check the result.",
+  "Prefer run_code for anything the other tools don't cover (h.progress in long loops), then check the result with look or screenshot, and audit_design overflow for text that doesn't fit.",
   "When Claude Bridge is open in several files, pass file: \"<name>\" (required for changes)."
 ].join(" ");
 function send(obj) { process.stdout.write(JSON.stringify(obj) + "\n"); }
+const PROTOCOLS = ["2025-06-18", "2025-11-25", "2025-03-26", "2024-11-05"];   // the first is answered to clients asking for one we don't know
+const requests = new Map();   // MCP request id -> { cancelled, call } while a tool call runs
 async function handle(msg) {
   if (Array.isArray(msg)) { for (const m of msg) await handle(m); return; }
   if (!msg || typeof msg !== "object") return send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid request" } });
   const id = msg.id, method = msg.method, params = msg.params || {};
-  if (id === undefined || id === null) return; // notification
+  if (id === undefined || id === null) {   // notifications
+    if (method === "notifications/cancelled") {
+      const req = requests.get(params.requestId);
+      if (req && !req.cancelled) {
+        req.cancelled = true;
+        const c = req.call;
+        if (c && !c.done && !c.jid && c.waiters <= 1) cancelCall(c);   // the user stopped Claude: drop what hasn't run yet
+      }
+    }
+    return;
+  }
   try {
     switch (method) {
       case "initialize":
+        setClient(params.clientInfo);
         return send({ jsonrpc: "2.0", id, result: {
-          protocolVersion: params.protocolVersion || "2024-11-05",
+          protocolVersion: PROTOCOLS.indexOf(params.protocolVersion) >= 0 ? params.protocolVersion : PROTOCOLS[0],
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: "figma-bridge", version: VERSION },
           instructions: INSTRUCTIONS
         } });
       case "ping": return send({ jsonrpc: "2.0", id, result: {} });
       case "tools/list": return send({ jsonrpc: "2.0", id, result: { tools: listTools() } });
-      case "tools/call": return send({ jsonrpc: "2.0", id, result: await callTool(params.name, params.arguments) });
+      case "tools/call": {
+        const req = { cancelled: false, call: null };
+        requests.set(id, req);
+        const token = params._meta && params._meta.progressToken;
+        let beat = null;
+        if (token !== undefined && token !== null) {   // progress notifications while it runs
+          const t0 = Date.now();
+          beat = setInterval(() => {
+            const c = req.call, p = c && c.ctx.progress;
+            send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: Math.round((Date.now() - t0) / 1000), message: (c ? stateOf(c) : "working") + (p && p.total ? " " + p.done + "/" + p.total : "") } });
+          }, Math.min(10000, Math.max(200, Math.round(SOFT_MS / 4))));
+        }
+        try {
+          const result = await callTool(params.name, params.arguments, req);
+          if (!req.cancelled) send({ jsonrpc: "2.0", id, result });
+        } finally { clearInterval(beat); requests.delete(id); }
+        return;
+      }
       case "resources/list": return send({ jsonrpc: "2.0", id, result: { resources: [] } });
       case "prompts/list": return send({ jsonrpc: "2.0", id, result: { prompts: PROMPTS.map((p) => ({ name: p.name, title: p.title, description: p.description, arguments: p.arguments })) } });
       case "prompts/get":

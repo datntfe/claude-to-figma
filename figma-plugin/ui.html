@@ -16,12 +16,28 @@
   h1 { font-size: 13px; margin: 0; font-weight: 600; flex: 1; }
   #status { margin: 6px 0 8px; color: var(--figma-color-text-secondary, #666); }
   #status.paused { color: var(--figma-color-text-warning, #b45309); }
+  #status.askfirst { color: var(--figma-color-text-brand, #0b74c4); }
   label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; color: var(--figma-color-text-secondary, #555); }
   label input { margin: 0; }
   .tools { justify-content: space-between; }
-  button { font: inherit; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--figma-color-border, #ccc);
+  .tools > .row { gap: 12px; }
+  button, select { font: inherit; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--figma-color-border, #ccc);
            background: transparent; color: inherit; cursor: pointer; }
+  select { padding: 2px 4px; background: var(--figma-color-bg, #fff); }
   button:hover { background: var(--figma-color-bg-hover, #f2f2f2); }
+  button.primary { background: var(--figma-color-bg-brand, #0d99ff); border-color: transparent; color: var(--figma-color-text-onbrand, #fff); font-weight: 600; }
+  button.primary:hover { background: var(--figma-color-bg-brand-hover, #0b8ae6); }
+  button.link { border: 0; padding: 3px 2px; color: var(--figma-color-text-brand, #0b74c4); background: transparent; }
+  #asks:not(:empty) { padding: 8px; border-bottom: 1px solid var(--figma-color-border, #e6e6e6); max-height: 55%; overflow: auto; }
+  .ask { border: 1px solid var(--figma-color-border-brand, #0d99ff); background: var(--figma-color-bg-brand-tertiary, #e8f4ff); border-radius: 7px; padding: 8px 9px; }
+  .ask + .ask { margin-top: 6px; }
+  .ask-h { font-size: 11px; color: var(--figma-color-text-secondary, #555); }
+  .ask-t { font-weight: 600; margin: 1px 0 6px; word-break: break-word; }
+  .ask-d { display: none; margin: 0 0 6px; padding: 6px 8px; border-radius: 5px; max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+           font: 10.5px/1.45 ui-monospace, Menlo, monospace; background: var(--figma-color-bg, #fff); color: var(--figma-color-text-secondary, #555); }
+  .ask.open .ask-d { display: block; }
+  .ask-b { flex-wrap: wrap; row-gap: 4px; gap: 6px; }
+  .ask-b .left { margin-left: auto; }
   #log { flex: 1; overflow: auto; padding: 4px 6px; }
   .empty { color: var(--figma-color-text-tertiary, #999); padding: 18px 8px; text-align: center; }
   .item { border-radius: 6px; padding: 6px 6px 6px 8px; cursor: pointer; }
@@ -30,15 +46,21 @@
   .line { display: flex; align-items: center; gap: 7px; }
   .st { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #9ca3af; }
   .pending .st { background: #d97706; animation: pulse 1s infinite; }
+  .pending.asking .st { background: var(--figma-color-bg-brand, #0d99ff); }
   .ok .st { background: #16a34a; }
   .fail .st { background: #dc2626; }
   @keyframes pulse { 50% { opacity: .3; } }
   .sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fail .sum { color: var(--figma-color-text-danger, #b91c1c); }
-  .sub { display: flex; align-items: center; gap: 6px; margin: 1px 0 0 15px; }
-  .meta { color: var(--figma-color-text-tertiary, #999); font-size: 11px; white-space: nowrap; }
-  .undo { font-size: 10.5px; padding: 0 5px; border-radius: 4px; background: var(--figma-color-bg-secondary, #f0f0f0); color: var(--figma-color-text-secondary, #666); white-space: nowrap; }
+  .sub { display: flex; align-items: center; gap: 6px; margin: 1px 0 0 15px; min-width: 0; }
+  .meta { color: var(--figma-color-text-tertiary, #999); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .undo, .by { font-size: 10.5px; padding: 0 5px; border-radius: 4px; background: var(--figma-color-bg-secondary, #f0f0f0); color: var(--figma-color-text-secondary, #666); white-space: nowrap; }
+  .by { display: none; }
+  body.many .by { display: inline; }
   .show { padding: 1px 7px; font-size: 11px; }
+  .bar { display: none; height: 3px; margin: 5px 0 1px 15px; border-radius: 2px; overflow: hidden; background: var(--figma-color-bg-secondary, #eee); }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--figma-color-bg-brand, #0d99ff); transition: width .2s; }
+  .pending .bar.on { display: block; }
   .detail { display: none; margin: 6px 0 2px 15px; padding: 6px 8px; border-radius: 5px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word;
             font: 10.5px/1.45 ui-monospace, Menlo, monospace; background: var(--figma-color-bg-secondary, #f5f5f5); color: var(--figma-color-text-secondary, #555); }
   .item.open .detail { display: block; }
@@ -52,13 +74,21 @@
 <body>
   <div class="top">
     <div class="row"><div id="dot" class="dot"></div><h1>Claude Bridge</h1>
-      <label title="When off, Claude can still look at this file but can't change it."><input type="checkbox" id="allow" checked> Allow changes</label></div>
+      <select id="mode" title="What Claude may do in this file (remembered for this file)">
+        <option value="allow">Allow changes</option>
+        <option value="ask">Ask first</option>
+        <option value="off">Look only</option>
+      </select></div>
     <div id="status">Connecting to the bridge on this computer…</div>
     <div class="row tools">
-      <label><input type="checkbox" id="onlyChanges"> Changes only</label>
+      <span class="row">
+        <label><input type="checkbox" id="onlyChanges"> Changes only</label>
+        <label title="Scroll the canvas to what Claude changes (your selection stays as it is)"><input type="checkbox" id="follow"> Follow</label>
+      </span>
       <button id="saveVersion" title="Save a restore point in the file's version history">Save version</button>
     </div>
   </div>
+  <div id="asks"></div>
   <div id="log"><div class="empty" id="empty">What Claude does in this file shows up here. Each change is one Cmd+Z.</div></div>
   <div class="row foot">
     <span id="counts">0 calls</span>
@@ -66,44 +96,62 @@
   </div>
   <div id="grip" title="Drag to resize"></div>
 <script>
-  var ws = null, retry = null, calls = 0, failed = 0, rows = {}, order = [], outbox = [], lastHello = null;
+  var ws = null, retry = null, calls = 0, failed = 0, rows = {}, order = [], outbox = [], lastHello = null, senders = {};
   var WRITES = { run_code: 1, build: 1, delete_nodes: 1, set_variables: 1, bind_variables: 1, set_styles: 1, import_from_library: 1, update_nodes: 1, place_image: 1 };
   var LABELS = { build: "Building", update_nodes: "Changing layers", delete_nodes: "Deleting layers", run_code: "Running code", set_variables: "Changing variables",
     bind_variables: "Binding variables", set_styles: "Changing styles", import_from_library: "Importing from a library", place_image: "Placing an image",
     audit_design: "Checking the design", get_spec: "Reading the design", get_selection: "Reading the selection", get_context: "Looking at your screen",
     screenshot: "Taking a screenshot", find_nodes: "Searching layers", export_nodes: "Exporting", get_tree: "Reading layers", get_variables: "Reading variables",
     get_library: "Reading the library", focus: "Showing layers", set_page: "Switching page", list_pages: "Listing pages", ping: "Checking the connection" };
-  var dot = document.getElementById("dot"), statusEl = document.getElementById("status"), logEl = document.getElementById("log");
-  var allowEl = document.getElementById("allow"), onlyEl = document.getElementById("onlyChanges");
+  var STATES = { queued: "Waiting for the change before it", asking: "Waiting for your OK", stopping: "Stopping…", cancelled: "Cancelled",
+    overdue: "Still running · the next change went ahead" };
+  var dot = document.getElementById("dot"), statusEl = document.getElementById("status"), logEl = document.getElementById("log"), asksEl = document.getElementById("asks");
+  var modeEl = document.getElementById("mode"), onlyEl = document.getElementById("onlyChanges"), followEl = document.getElementById("follow");
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function toMain(m) { parent.postMessage({ pluginMessage: m }, "*"); }
-  function setStatus(state, text) { dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : ""); statusEl.textContent = text; statusEl.className = ""; }
+  function setStatus(state, text) {
+    dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : "");
+    statusEl.textContent = text;
+    statusEl.className = state === "on" ? (modeEl.value === "off" ? "paused" : modeEl.value === "ask" ? "askfirst" : "") : "";
+  }
   function connectedText() {
-    if (!allowEl.checked) { statusEl.className = "paused"; return "Changes paused: Claude can look at this file but not change it."; }
+    if (modeEl.value === "off") return "Look only: Claude can look at this file but not change it.";
+    if (modeEl.value === "ask") return "Ask first: you approve each change Claude wants to make here.";
     return lastHello && lastHello.file ? "Connected: Claude can work in “" + lastHello.file + "”. Keep this window open." : "Connected. Claude can now work in this file. Keep this window open.";
   }
+  function refreshStatus() { if (ws && ws.readyState === 1) setStatus("on", connectedText()); }
   function time(t) { var d = new Date(t); return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
+  function secs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + "s" : ms + "ms"; }
   function counts() { document.getElementById("counts").textContent = calls + (calls === 1 ? " call" : " calls") + (failed ? " · " + failed + " failed" : ""); }
   function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
   function isWrite(c, p) { return !!WRITES[c] || (c === "set_page" && p && p.create) || (c === "audit_design" && p && p.fix && p.fix.length); }
   function filter() { for (var i = 0; i < order.length; i++) { var r = rows[order[i]]; r.el.style.display = onlyEl.checked && !r.write ? "none" : ""; } }
 
-  /* one row per command: pending → done, with what changed and a Show button */
+  /* one row per command: pending (queued / waiting for your OK / running n of m) → done, with what changed and a Show button */
   function addRow(msg) {
     calls++; counts();
     var empty = document.getElementById("empty"); if (empty) empty.remove();
     var write = isWrite(msg.command, msg.params);
-    var r = { id: msg.id, command: msg.command, write: write, started: Date.now(), params: msg.params };
+    var r = { id: msg.id, command: msg.command, write: write, started: Date.now(), params: msg.params, state: "running", by: msg.by || "" };
+    if (r.by) { senders[r.by] = 1; if (Object.keys(senders).length > 1) document.body.classList.add("many"); }
     r.el = el("div", "item pending" + (write ? " write" : " read"));
     var line = el("div", "line");
     line.appendChild(el("span", "st"));
     r.sum = line.appendChild(el("span", "sum", (LABELS[msg.command] || msg.command) + "…"));
+    if (write) {
+      r.cancel = line.appendChild(el("button", "show cancel", "Cancel"));
+      r.cancel.title = "Don't make this change (or stop it at its next step)";
+      r.cancel.onclick = function () { toMain({ type: "cancel", rid: r.id }); r.cancel.disabled = true; };
+    }
     r.line = line;
     r.el.appendChild(line);
     var sub = el("div", "sub");
     if (write) sub.appendChild(el("span", "undo", "↶ 1 undo"));
+    if (r.by) sub.appendChild(el("span", "by", r.by));
     r.meta = sub.appendChild(el("span", "meta", time(r.started)));
     r.el.appendChild(sub);
+    r.bar = r.el.appendChild(el("div", "bar"));
+    r.fill = r.bar.appendChild(el("i"));
     r.detail = r.el.appendChild(el("div", "detail", "request: " + clip(JSON.stringify(msg.params || {}), 2000)));
     r.el.onclick = function (e) { if (e.target.tagName !== "BUTTON") r.el.classList.toggle("open"); };
     logEl.appendChild(r.el);
@@ -112,9 +160,26 @@
     filter();
     logEl.scrollTop = logEl.scrollHeight;
   }
+  function pendingText(r) {
+    var t = STATES[r.state];
+    if (!t) t = r.total ? r.done + " of " + r.total + (r.text ? " · " + r.text : "") : (r.text || "Running");
+    return t + " · " + secs(Date.now() - r.started);
+  }
+  function onProgress(m) {
+    var r = rows[m.rid];
+    if (!r || r.finished) return;
+    r.state = m.state || r.state;
+    if (m.total) { r.done = m.done || 0; r.total = m.total; r.fill.style.width = Math.min(100, Math.round(100 * r.done / r.total)) + "%"; r.bar.className = "bar on"; }
+    if (m.text) r.text = m.text;
+    r.el.classList.toggle("asking", r.state === "asking");
+    r.meta.textContent = pendingText(r);
+  }
   function finishRow(m) {
     var r = rows[m.rid !== undefined ? m.rid : m.id];
     if (!r) return;
+    r.finished = true;
+    if (r.cancel) { r.cancel.remove(); r.cancel = null; }
+    removeAsk(r.id);
     if (m.type === "result") {   // arrives first; "done" adds the summary
       r.el.className = "item " + (m.ok ? "ok" : "fail") + (r.write ? " write" : " read") + (r.el.classList.contains("open") ? " open" : "");
       if (!m.ok) { failed++; counts(); r.sum.textContent = "Failed: " + clip(m.error, 120); r.detail.textContent += "\n\nerror: " + m.error; }
@@ -122,7 +187,7 @@
     }
     r.sum.textContent = m.summary || r.sum.textContent;
     r.sum.title = m.summary || "";
-    r.meta.textContent = (m.ms >= 1000 ? (m.ms / 1000).toFixed(1) + "s" : m.ms + "ms") + " · " + time(r.started);
+    r.meta.textContent = secs(m.ms) + " · " + time(r.started);
     if (m.ok && m.preview) r.detail.textContent += "\n\nresult: " + m.preview;
     if (m.touched && m.touched.length) {
       var b = el("button", "show", "Show");
@@ -132,6 +197,38 @@
     }
     filter();
   }
+  /* Ask first: a card for each change waiting for the user's OK */
+  function addAsk(m) {
+    removeAsk(m.rid);
+    var r = rows[m.rid];
+    var c = el("div", "ask"); c.id = "ask-" + m.rid; c.until = m.until;
+    c.appendChild(el("div", "ask-h", (r && r.by && document.body.classList.contains("many") ? r.by : "Claude") + " wants to:"));
+    c.appendChild(el("div", "ask-t", m.text));
+    if (m.detail) c.appendChild(el("pre", "ask-d", m.detail));
+    var bar = el("div", "row ask-b");
+    var yes = bar.appendChild(el("button", "primary", "Allow")); yes.onclick = function () { decide(m.rid, true); };
+    var no = bar.appendChild(el("button", "", "Deny")); no.onclick = function () { decide(m.rid, false); };
+    if (m.targets && m.targets.length) { var sh = bar.appendChild(el("button", "", "Show")); sh.title = "See the layers it will change"; sh.onclick = function () { toMain({ type: "ui-focus", ids: m.targets }); }; }
+    if (m.detail) { var dt = bar.appendChild(el("button", "link", "Details")); dt.onclick = function () { c.classList.toggle("open"); }; }
+    var more = bar.appendChild(el("button", "link", "Allow for 10 min")); more.title = "Allow this and every change for the next 10 minutes"; more.onclick = function () { decide(m.rid, true, 10); };
+    c.left = bar.appendChild(el("span", "meta left"));
+    c.appendChild(bar);
+    asksEl.appendChild(c);
+    tickAsks();
+  }
+  function decide(rid, ok, minutes) { toMain({ type: "decide", rid: rid, ok: ok, minutes: minutes }); removeAsk(rid); }
+  function removeAsk(rid) { var c = document.getElementById("ask-" + rid); if (c) c.remove(); }
+  function tickAsks() {
+    var cards = asksEl.children;
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i], s = Math.max(0, Math.round((c.until - Date.now()) / 1000));
+      if (c.left && c.until) c.left.textContent = Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2) + " left";
+    }
+  }
+  setInterval(function () {
+    for (var i = 0; i < order.length; i++) { var r = rows[order[i]]; if (r && !r.finished) r.meta.textContent = pendingText(r); }
+    tickAsks();
+  }, 1000);
 
   function port() { return parseInt(document.getElementById("port").value, 10) || 3055; }
   var openedAt = 0, quickDrops = 0;   // an older (1.1) bridge drops the previous file whenever another file connects
@@ -149,7 +246,9 @@
     ws.onmessage = function (ev) {
       var msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      if (!msg || !msg.command) return;
+      if (!msg) return;
+      if (msg.type === "cancel") { toMain({ type: "cancel", rid: msg.rid, by: msg.by || "claude" }); return; }   // Claude cancelled it
+      if (!msg.command) return;
       if (msg.command !== "ping") addRow(msg);   // status checks don't clutter the timeline
       toMain({ type: "command", id: msg.id, command: msg.command, params: msg.params, deadline: msg.deadline });
     };
@@ -167,14 +266,18 @@
     ws.onerror = function () { /* onclose follows */ };
   }
   // Messages from the plugin's main thread that go to the bridge server:
-  // results, hello (who we are), info (page changed, paused), activity (the user did something here).
-  // "done" and "saved" are for this window only.
-  var FORWARD = { result: 1, hello: 1, info: 1, activity: 1 };
+  // results, hello (who we are), info (page changed, Look only / Ask first), activity (the user did something here),
+  // progress (queued, waiting for the user's OK, running n of m). "done", "ask", "asked", "prefs" and "saved" are for this window only.
+  var FORWARD = { result: 1, hello: 1, info: 1, activity: 1, progress: 1 };
   window.onmessage = function (ev) {
     var m = ev.data && ev.data.pluginMessage;
     if (!m) return;
     if (m.type === "done" || m.type === "result") finishRow(m);
-    if (m.type === "saved") { statusEl.textContent = m.ok ? "Saved a version: " + m.title : "Couldn't save a version: " + m.error; setTimeout(function () { if (ws && ws.readyState === 1) setStatus("on", connectedText()); }, 4000); }
+    if (m.type === "progress") onProgress(m);
+    if (m.type === "ask") addAsk(m);
+    if (m.type === "asked") removeAsk(m.rid);
+    if (m.type === "prefs") { if (m.mode) modeEl.value = m.mode; followEl.checked = !!m.follow; refreshStatus(); }
+    if (m.type === "saved") { statusEl.textContent = m.ok ? "Saved a version: " + m.title : "Couldn't save a version: " + m.error; setTimeout(refreshStatus, 4000); }
     if (!FORWARD[m.type]) return;
     if (m.type === "hello" && m.info) { lastHello = m.info; setStatus("on", connectedText()); }
     send(m);
@@ -190,11 +293,12 @@
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") send({ type: "activity", what: "focus" }); });
   window.addEventListener("focus", function () { send({ type: "activity", what: "focus" }); });
   document.getElementById("reconnect").onclick = function () { quickDrops = 0; connect(); };
-  allowEl.onchange = function () { toMain({ type: "allow", on: allowEl.checked }); if (ws && ws.readyState === 1) setStatus("on", connectedText()); };
+  modeEl.onchange = function () { toMain({ type: "mode", mode: modeEl.value }); refreshStatus(); };
+  followEl.onchange = function () { toMain({ type: "follow", on: followEl.checked }); };
   onlyEl.onchange = filter;
   document.getElementById("saveVersion").onclick = function () { statusEl.textContent = "Saving a version…"; toMain({ type: "ui-save-version" }); };
   document.getElementById("copy").onclick = function () {
-    var lines = order.map(function (id) { var r = rows[id]; return time(r.started) + "  " + r.command + "  " + r.sum.textContent + "  " + r.meta.textContent; });
+    var lines = order.map(function (id) { var r = rows[id]; return time(r.started) + "  " + (r.by ? r.by + "  " : "") + r.command + "  " + r.sum.textContent + "  " + r.meta.textContent; });
     var ta = el("textarea"); ta.value = lines.join("\n"); document.body.appendChild(ta); ta.select();
     try { document.execCommand("copy"); } catch (e) {}
     ta.remove();

@@ -23,8 +23,8 @@ function fakePlugin(tag, file) {
   const connect = () => {
     if (stop) return;
     ws = new WebSocket("ws://localhost:" + PORT);
-    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.4.0", session: tag } }));
-    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.4.0" } : { by: tag, cmd: m.command, code: m.params.code, len: (m.params.code || "").length } })); };
+    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.5.0", session: tag } }));
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.5.0" } : { by: tag, cmd: m.command, code: m.params.code, len: (m.params.code || "").length } })); };
     let retried = false;
     const again = () => { if (!retried) { retried = true; setTimeout(connect, 300); } };
     ws.onclose = again;

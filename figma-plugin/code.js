@@ -7,10 +7,12 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
-let allowWrites = true;   // the "Allow changes" switch in the panel
+let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
+let askGrantUntil = 0;    // "Allow for 10 min" in Ask mode
+let follow = false;       // the panel's Follow switch: the screen follows Claude's changes
 
 const PANEL = { w: 320, h: 440, minW: 260, minH: 220, maxW: 900, maxH: 1200 };
 figma.showUI(__html__, { width: PANEL.w, height: PANEL.h, themeColors: true, title: "Claude Bridge" });
@@ -107,7 +109,8 @@ function label(n) {
 function fileKey() { return safe(function () { return figma.fileKey || undefined; }, undefined); }
 function helloInfo() {
   const o = { file: figma.root.name, fileKey: fileKey(), page: figma.currentPage.name, editorType: figma.editorType, version: VERSION, session: SESSION };
-  if (!allowWrites) o.paused = true;
+  if (mode === "off") o.paused = true;
+  if (mode === "ask") o.ask = true;
   return o;
 }
 
@@ -147,7 +150,9 @@ const H = {
   update: function (node, props) { return applyProps(node, props || {}, makeCtx()); },
   link: function (node, to, opts) { return setLink(node, Object.assign({ to: typeof to === "string" ? to : to.id }, opts || {})); },
   component: function (ref, variant) { return resolveComponent(ref, variant); },
-  shader: function (node, spec) { return applyShader(node, spec, makeCtx()); }
+  shader: function (node, spec) { return applyShader(node, spec, makeCtx()); },
+  /* shows progress in the Claude Bridge window; throws when the user presses Cancel there */
+  progress: function (done, total, text) { if (stopRequested()) throw new Error(STOPPED); progress(done, total, text); }
 };
 
 async function getNode(id) {
@@ -1819,8 +1824,43 @@ async function auditNode(n, o) {
     }
   }
   if (o.on("targets") && n.reactions && n.reactions.length && "width" in n && (n.width < 44 || n.height < 44)) o.add("targets", "warning", n, "Tap target " + round(n.width) + "×" + round(n.height) + " is smaller than 44×44");
+  if (o.on("overflow") && n.visible !== false && !n.rotation) overflowCheck(n, o);
   if (o.on("autolayout") && !inInst && n.type === "FRAME" && n.layoutMode === "NONE" && n.children.length >= 2 && n.children.length <= 50 && n.parent && n.parent.type !== "PAGE" && n.parent.type !== "SECTION" && !inferLayout(n).overlap) {
     o.add("autolayout", "info", n, "Frame with " + n.children.length + " stacked layers but no auto layout", { fix: "autolayout" });
+  }
+}
+
+/* Content that doesn't fit: text running out of its box (its rendered bounds are bigger than
+   the box), layers that stick out of their auto layout frame, text cut off by a clipping frame.
+   Read-only: measured from what Figma already rendered. */
+function outside(b, box) { return Math.max(box.x - b.x, box.y - b.y, b.x + b.width - (box.x + box.width), b.y + b.height - (box.y + box.height)); }
+function overflowCheck(n, o) {
+  const box = safe(function () { return n.absoluteBoundingBox; }, null);
+  if (!box) return;
+  if (n.type === "TEXT" && n.textAutoResize !== "WIDTH_AND_HEIGHT" && n.textTruncation !== "ENDING") {
+    const rb = safe(function () { return n.absoluteRenderBounds; }, null);
+    if (rb) {
+      const size = n.fontSize === figma.mixed ? 12 : n.fontSize || 12;
+      const down = rb.y + rb.height - (box.y + box.height), right = rb.x + rb.width - (box.x + box.width);
+      if (down > Math.max(2, size * 0.6)) o.add("overflow", "error", n, "Text runs " + Math.round(down) + "px below its box (height " + round(n.height) + " is fixed): let the height hug, or shorten the text");
+      else if (right > 2) o.add("overflow", "error", n, "Text runs " + Math.round(right) + "px past the right edge of its box: a word is longer than the width " + round(n.width));
+    }
+  }
+  const par = n.parent;
+  if (!par || par.type === "PAGE" || par.type === "SECTION" || par.type === "DOCUMENT") return;
+  if (par.layoutMode && par.layoutMode !== "NONE" && n.layoutPositioning !== "ABSOLUTE") {
+    const pb = safe(function () { return par.absoluteBoundingBox; }, null);
+    const over = pb ? outside(box, pb) : 0;
+    if (over > 1) o.add("overflow", "error", n, "Doesn't fit in “" + par.name + "” (auto layout): sticks out " + Math.round(over) + "px" + (par.clipsContent ? " and is cut off" : ""));
+    return;
+  }
+  if (n.type !== "TEXT") return;
+  for (let q = par; q && q.type !== "PAGE" && q.type !== "SECTION" && q.type !== "DOCUMENT"; q = q.parent) {
+    if (!q.clipsContent) continue;
+    const qb = safe(function () { return q.absoluteBoundingBox; }, null);
+    const over = qb ? outside(box, qb) : 0;
+    if (over > 1) { o.add("overflow", "error", n, "Cut off by “" + q.name + "”: " + Math.round(over) + "px of the text is outside it"); }
+    break;
   }
 }
 
@@ -2474,7 +2514,8 @@ async function getSpec(p) {
 const handlers = {
   async ping() {
     const o = { file: figma.root.name, fileKey: fileKey(), page: figma.currentPage.name, editorType: figma.editorType, selection: figma.currentPage.selection.length, version: VERSION, zoom: round(figma.viewport.zoom) };
-    if (!allowWrites) o.paused = true;
+    if (mode === "off") o.paused = true;
+    if (mode === "ask") o.ask = true;
     return o;
   },
   async run_code(p) {
@@ -2567,7 +2608,9 @@ const handlers = {
     const specs = Array.isArray(p.spec) ? p.spec : [p.spec];
     const created = [], roots = [], rootSpecs = [], errors = [];
     const env = { ctx: makeCtx(), idx: await varIndex(), links: [], notes: [] };
+    let stopped = null;
     for (let i = 0; i < specs.length; i++) {
+      if (!step(i, specs.length, specs[i] && specs[i].name)) { stopped = "Cancelled after " + i + " of " + specs.length + " items: the rest was not built."; break; }
       const start = created.length;
       try { roots.push(await buildNode(specs[i], parent, created, env)); rootSpecs.push(specs[i] || {}); }
       catch (e) {
@@ -2605,6 +2648,7 @@ const handlers = {
     if (placed.length) res.placed_at = placed.length === 1 ? placed[0] : placed;
     if (env.notes.length) res.notes = env.notes;
     if (errors.length) res.errors = errors;
+    if (stopped) res.stopped = stopped;
     return res;
   },
   async find_nodes(p) {
@@ -2643,7 +2687,9 @@ const handlers = {
     if (p.save_version) await saveVersion(p.save_version);
     const ctx = makeCtx(), idx = await varIndex();
     const done = [], errors = [];
+    let stopped = null;
     for (let i = 0; i < items.length; i++) {
+      if (!step(i, items.length)) { stopped = "Cancelled after " + i + " of " + items.length + " items: the rest was not changed."; break; }
       const it = items[i];
       let nodes;
       try {
@@ -2659,6 +2705,7 @@ const handlers = {
     }
     const res = { file: figma.root.name, done: done };
     if (errors.length) res.errors = errors;
+    if (stopped) res.stopped = stopped;
     return res;
   },
   async audit_design(p) {
@@ -3064,7 +3111,7 @@ function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
 function summarize(cmd, r, ok, err) {
   if (!ok) return "Failed: " + clip(err, 100);
   r = r || {};
-  const errs = r.errors && r.errors.length ? " · " + plural(r.errors.length, "error") : "";
+  const errs = (r.errors && r.errors.length ? " · " + plural(r.errors.length, "error") : "") + (r.stopped ? " · stopped" : "");
   switch (cmd) {
     case "build": return "Created " + plural(r.created || 0, "layer") + errs;
     case "update_nodes": return "Changed " + plural((r.done || []).length, "layer") + errs;
@@ -3132,24 +3179,206 @@ function toastChange(summary, touched) {
     lastToastAt = Date.now();
   } catch (e) { /* notify unavailable */ }
 }
+/* ---------- the panel: approvals, progress, cancel, follow ---------- */
+const STOPPED = "Stopped part way through (cancelled): what it did before stopping stays in the file (one Cmd+Z undoes it).";
+const VIEW_COMMANDS = { focus: 1, set_page: 1 };   // reads that move the user's view: what follows them is Claude's doing
+const ASK_MAX_MS = 10 * 60000;
+const ASKS = new Map();      // command id → a change waiting for the user's OK (Ask first)
+const QUEUED = new Map();    // command id → a change waiting for the change before it
+const RUNNING = new Map();   // command id → a change running now
+let curWrite = null, pendingWrites = 0;
+/* while a change (or focus / set_page) runs, what happens in the file is Claude's doing */
+const BUSY = new Set();
+function busyStart(id) { if (!BUSY.has(id)) { BUSY.add(id); busy++; } }
+function busyEnd(id) { if (BUSY.delete(id)) { busy--; lastClaudeAt = Date.now(); } }
+function saveStore(k, v) { try { Promise.resolve(figma.clientStorage.setAsync(k, v)).catch(function () { }); } catch (e) { /* no storage */ } }
+function stopRequested() { const r = curWrite && RUNNING.get(curWrite); return !!(r && r.cancel); }
+function progressOut(rid, o) { try { figma.ui.postMessage(Object.assign({ type: "progress", rid: rid }, o)); } catch (e) { /* closing */ } }
+function progress(done, total, text) {
+  const r = curWrite && RUNNING.get(curWrite);
+  if (!r) return;
+  const now = Date.now();
+  if (now - r.sent < 150 && !(total && done >= total)) return;
+  r.sent = now;
+  const o = { state: "running" };
+  if (typeof done === "number") o.done = done;
+  if (typeof total === "number") o.total = total;
+  if (text !== undefined && text !== null) o.text = clip(String(text), 80);
+  progressOut(curWrite, o);
+}
+/* batch commands stop between items when the user (or Claude) cancels */
+function step(i, total, text) { if (stopRequested()) return false; progress(i, total, text); return true; }
+function countSpecs(specs) { let n = 0; (function walk(list) { list.forEach(function (s) { if (!s || typeof s !== "object") return; n++; if (Array.isArray(s.children)) walk(s.children); }); })(specs); return n; }
+function quoteNames(list) {
+  const names = list.filter(function (x) { return typeof x === "string" && x; });
+  return names.length ? ": " + names.slice(0, 3).map(function (x) { return "“" + clip(x, 30) + "”"; }).join(", ") + (names.length > 3 ? " +" + (names.length - 3) : "") : "";
+}
+/* what a change will do, in a few words, for the approval card */
+async function describeRequest(cmd, p) {
+  p = p || {};
+  const targets = cmd === "delete_nodes" ? (p.ids || []).filter(function (x) { return typeof x === "string" && NODE_ID.test(x); }).slice(0, 50) : touchedIds(cmd, p, null);
+  let text;
+  switch (cmd) {
+    case "build": { const specs = Array.isArray(p.spec) ? p.spec : [p.spec]; text = "Create " + plural(countSpecs(specs), "layer") + quoteNames(specs.map(function (s) { return s && s.name; })); break; }
+    case "update_nodes": {
+      const keys = [];
+      (p.items || []).forEach(function (it) { Object.keys(it || {}).forEach(function (k) { if (["id", "ids", "node_id"].indexOf(k) < 0 && keys.indexOf(k) < 0) keys.push(k); }); });
+      text = "Change " + plural(targets.length || (p.items || []).length, "layer") + (keys.length ? " (" + keys.slice(0, 5).join(", ") + (keys.length > 5 ? "…" : "") + ")" : "");
+      break;
+    }
+    case "delete_nodes": {
+      const names = [];
+      for (let i = 0; i < targets.length && i < 4; i++) { const n = await figma.getNodeByIdAsync(targets[i]); if (n) names.push(n.name); }
+      text = "Delete " + plural((p.ids || []).length, "layer") + quoteNames(names);
+      break;
+    }
+    case "run_code": text = "Run code in this file (" + plural(String(p.code || "").split("\n").length, "line") + ")"; break;
+    case "set_variables": text = "Change variables (" + plural((p.ops || []).length, "change") + ")"; break;
+    case "bind_variables": text = "Bind variables (" + plural((p.bindings || []).length, "binding") + ")"; break;
+    case "set_styles": text = "Change styles (" + plural((p.ops || []).length, "change") + ")"; break;
+    case "import_from_library": text = "Import a " + (p.kind || "library item").replace(/_/g, " ") + " from a library"; break;
+    case "place_image": text = "Place an image" + (p.name ? " “" + clip(p.name, 30) + "”" : ""); break;
+    case "set_page": text = "Create the page “" + clip(p.name || "", 40) + "”"; break;
+    case "audit_design": text = "Apply design fixes (" + [].concat(p.fix || []).join(", ") + ")"; break;
+    default: text = cmd.replace(/_/g, " ");
+  }
+  return { text: text, detail: cmd === "run_code" ? clip(String(p.code || ""), 3000) : preview(p), targets: targets };
+}
+async function askUser(msg) {
+  const req = await describeRequest(msg.command, msg.params);
+  return new Promise(function (resolve) {
+    const until = msg.deadline || Date.now() + ASK_MAX_MS;
+    const a = { resolve: resolve, toast: null, timer: null };
+    ASKS.set(msg.id, a);
+    figma.ui.postMessage({ type: "ask", rid: msg.id, command: msg.command, text: req.text, detail: req.detail, targets: req.targets, until: until });
+    progressOut(msg.id, { state: "asking" });
+    try { a.toast = figma.notify("Claude wants to: " + req.text, { timeout: Infinity, button: { text: "Allow", action: function () { decide(msg.id, true); } } }); } catch (e) { /* no toasts */ }
+    a.timer = setTimeout(function () { decide(msg.id, false, "expired"); }, Math.max(0, until - Date.now()));
+  });
+}
+function decide(rid, ok, why, minutes) {
+  const a = ASKS.get(rid);
+  if (!a) return;
+  ASKS.delete(rid);
+  clearTimeout(a.timer);
+  if (a.toast) { try { a.toast.cancel(); } catch (e) { /* gone */ } }
+  if (ok && minutes > 0) askGrantUntil = Date.now() + Math.min(minutes, 120) * 60000;
+  figma.ui.postMessage({ type: "asked", rid: rid, ok: !!ok, why: why || "" });
+  a.resolve({ ok: !!ok, why: why || "" });
+}
+function notApproved(why) {
+  if (why === "expired") return "Not applied: nobody approved this change in Figma in time (the Claude Bridge window is set to Ask first). Nothing was changed. Ask the user to look at that window, or to switch it to Allow changes.";
+  if (why === "paused") return 'Not applied: the user switched the Claude Bridge window to "Look only" while this change waited. Nothing was changed.';
+  if (/^cancelled/.test(why)) return cancelledText(why.split(":")[1]);
+  return "The user declined this change in Figma (the Claude Bridge window is set to Ask first). Nothing was changed; ask them what to do differently.";
+}
+function cancelledText(by) { return "Cancelled before it ran" + (by === "claude" ? "" : " (by the user in Figma)") + ". Nothing was changed."; }
+function cancelCommand(rid, by) {
+  const who = by === "claude" ? "claude" : "user";
+  if (ASKS.has(rid)) { decide(rid, false, "cancelled:" + who); return "asking"; }
+  const q = QUEUED.get(rid);
+  if (q) { q.cancelled = who; progressOut(rid, { state: "cancelled" }); return "queued"; }
+  const r = RUNNING.get(rid);
+  if (r) { r.cancel = who; progressOut(rid, { state: "stopping" }); return "running"; }
+  return null;
+}
+function setMode(m, save) {
+  if (m !== "allow" && m !== "ask" && m !== "off") return;
+  mode = m;
+  if (m !== "ask") askGrantUntil = 0;
+  if (save) saveStore(modeKey(), m);
+  // changes waiting for an OK follow the switch
+  if (m === "allow") Array.from(ASKS.keys()).forEach(function (rid) { decide(rid, true); });
+  if (m === "off") Array.from(ASKS.keys()).forEach(function (rid) { decide(rid, false, "paused"); });
+  figma.ui.postMessage({ type: "info", info: { paused: m === "off", ask: m === "ask" } });
+  postPrefs();
+}
+function postPrefs() { try { figma.ui.postMessage({ type: "prefs", mode: mode, follow: follow }); } catch (e) { /* closing */ } }
+function modeKey() { return "mode:" + (fileKey() || figma.root.name); }
+let prefsReady = null, prefsDone = false;
+function loadPrefs() {
+  const get = function (k) { try { return Promise.resolve(figma.clientStorage.getAsync(k)).catch(function () { return undefined; }); } catch (e) { return Promise.resolve(undefined); } };
+  prefsReady = Promise.all([get(modeKey()), get("follow")]).then(function (v) {
+    prefsDone = true;
+    follow = !!v[1];
+    if (v[0] === "ask" || v[0] === "off") setMode(v[0], false); else postPrefs();
+  });
+  return prefsReady;
+}
+/* a change never runs before the saved switch (Look only, Ask first) is known */
+function prefsLoaded() {
+  if (prefsDone || !prefsReady) return Promise.resolve();
+  let t;
+  return Promise.race([prefsReady, new Promise(function (r) { t = setTimeout(r, 1500); })]).then(function () { clearTimeout(t); });
+}
+/* the picture that `look: true` sends back: the screens that changed */
+function screenOf(n) { let q = n; while (q.parent && q.parent.type !== "PAGE" && q.parent.type !== "SECTION") q = q.parent; return q; }
+async function lookAt(ids) {
+  const tops = [];
+  for (let i = 0; i < ids.length && i < 50; i++) {
+    const n = await figma.getNodeByIdAsync(ids[i]);
+    if (!n || n.type === "PAGE" || n.type === "DOCUMENT" || pageOf(n) !== figma.currentPage) continue;
+    const t = screenOf(n);
+    if (tops.indexOf(t) < 0) tops.push(t);
+  }
+  if (!tops.length) return null;
+  if (tops.length === 1) return exportNode(tops[0], undefined, 1000);
+  let u = null;
+  tops.forEach(function (n) { const bb = boxOf(n); if (bb) u = unionBox(u, bb); });
+  if (!u) return null;
+  const pad = Math.max(u.width, u.height) * 0.03;
+  return captureRegion({ x: u.x - pad, y: u.y - pad, width: u.width + 2 * pad, height: u.height + 2 * pad }, 1, 1000, "the " + tops.length + " changed frames");
+}
+/* Follow: keep Claude's changes on screen without touching the user's selection */
+async function followNodes(ids) {
+  const nodes = [];
+  for (let i = 0; i < ids.length && i < 20; i++) { const n = await figma.getNodeByIdAsync(ids[i]); if (n && n.type !== "PAGE" && n.type !== "DOCUMENT" && pageOf(n) === figma.currentPage) nodes.push(n); }
+  let u = null;
+  nodes.forEach(function (n) { const bb = boxOf(n); if (bb) u = unionBox(u, bb); });
+  if (!u) return;
+  const vb = figma.viewport.bounds;
+  if (u.x >= vb.x && u.y >= vb.y && u.x + u.width <= vb.x + vb.width && u.y + u.height <= vb.y + vb.height) return;   // already in view
+  if (u.width <= vb.width * 0.9 && u.height <= vb.height * 0.9) { figma.viewport.center = { x: u.x + u.width / 2, y: u.y + u.height / 2 }; return; }
+  const z = figma.viewport.zoom;
+  figma.viewport.scrollAndZoomIntoView(nodes);
+  if (figma.viewport.zoom > z) figma.viewport.zoom = z;
+}
 async function runCommand(msg, write) {
   const t0 = Date.now();
   let ok = false, result, error;
-  busy++;
+  if (VIEW_COMMANDS[msg.command]) busyStart(msg.id);   // other reads don't count as Claude's doing in the activity log
+  const q = QUEUED.get(msg.id);
+  QUEUED.delete(msg.id);
   try {
     const fn = handlers[msg.command];
     if (!fn) throw new Error("Unknown command: " + msg.command);
-    if (write && !allowWrites) throw new Error('Changes are paused in the Claude Bridge window of "' + figma.root.name + '". Ask the user to switch "Allow changes" back on in that window.');
-    if (write && msg.deadline && Date.now() > msg.deadline) throw new Error("Not applied: this change waited behind another change in this file until Claude stopped waiting for it. Nothing was changed; try again.");
+    if (write) {
+      await prefsLoaded();
+      if (q && q.cancelled) throw new Error(cancelledText(q.cancelled));
+      if (mode === "off") throw new Error('Changes are paused in the Claude Bridge window of "' + figma.root.name + '" (set to Look only). Ask the user to switch it back to Allow changes or Ask first.');
+      if (msg.deadline && Date.now() > msg.deadline) throw new Error("Not applied: this change waited behind another change in this file until Claude stopped waiting for it. Nothing was changed; try again.");
+      if (mode === "ask" && Date.now() > askGrantUntil) {
+        const d = await askUser(msg);
+        if (!d.ok) throw new Error(notApproved(d.why));
+      }
+      RUNNING.set(msg.id, { cancel: false, sent: 0 });
+      curWrite = msg.id;
+      busyStart(msg.id);   // not while it waited: what the user did meanwhile is theirs
+      progressOut(msg.id, { state: "running" });
+    }
     result = await fn(msg.params || {});
+    if (write && msg.params && msg.params.look && result && typeof result === "object" && !Array.isArray(result)) {
+      try { const pic = await lookAt(touchedIds(msg.command, msg.params, result)); if (pic) result.look = pic; else result.look_note = "Nothing on this page to show."; }
+      catch (e) { result.look_note = "Couldn't take the picture: " + (e && e.message ? e.message : e); }
+    }
     ok = true;
     figma.ui.postMessage({ type: "result", id: msg.id, ok: true, result: result });
   } catch (e) {
     error = String(e && e.message ? e.message : e);
     figma.ui.postMessage({ type: "result", id: msg.id, ok: false, error: error });
   } finally {
-    busy--;
-    lastClaudeAt = Date.now();
+    if (write) { RUNNING.delete(msg.id); if (curWrite === msg.id) curWrite = null; }
+    busyEnd(msg.id);
     if (MUTATING[msg.command]) { try { figma.commitUndo(); } catch (e) { /* not available */ } }
     try { lastVp = vpSnap(); } catch (e) { /* closing */ }
   }
@@ -3158,24 +3387,39 @@ async function runCommand(msg, write) {
     const touched = touchedIds(msg.command, msg.params, result);
     const summary = summarize(msg.command, result, ok, error);
     figma.ui.postMessage({ type: "done", rid: msg.id, command: msg.command, write: write, ok: ok, ms: Date.now() - t0, summary: summary, touched: touched, preview: ok ? preview(result) : error });
-    if (ok && write) toastChange(summary, touched);
+    if (ok && write) {
+      toastChange(summary, touched);
+      if (follow && touched.length) followNodes(touched).catch(function () { });
+    }
   } catch (e) { /* the panel is closing */ }
+}
+/* Changes run one after another. One that never finishes (say, run_code awaiting something that
+   never comes) holds the queue only until Claude has stopped waiting for it. */
+function guarded(msg) {
+  return new Promise(function (resolve) {
+    let settled = false, timer = null;
+    const finish = function () { if (settled) return; settled = true; clearTimeout(timer); pendingWrites = Math.max(0, pendingWrites - 1); resolve(); };
+    const until = msg.deadline ? msg.deadline + 2000 : Date.now() + ASK_MAX_MS + 60000;
+    timer = setTimeout(function () { progressOut(msg.id, { state: "overdue" }); busyEnd(msg.id); finish(); }, Math.max(1000, until - Date.now()));
+    runCommand(msg, true).then(finish, finish);
+  });
 }
 figma.ui.onmessage = function (msg) {
   if (!msg) return;
   if (msg.type === "ui-ready") {
     figma.ui.postMessage({ type: "hello", info: helloInfo() });
+    postPrefs();
     return;
   }
-  if (msg.type === "allow") {
-    allowWrites = msg.on !== false;
-    figma.ui.postMessage({ type: "info", info: { paused: !allowWrites } });
-    return;
-  }
+  if (msg.type === "mode") { setMode(msg.mode, true); return; }
+  if (msg.type === "allow") { setMode(msg.on === false ? "off" : "allow", true); return; }   // panels before 1.5
+  if (msg.type === "follow") { follow = !!msg.on; saveStore("follow", follow); return; }
+  if (msg.type === "decide") { decide(msg.rid, !!msg.ok, msg.ok ? "" : "denied", msg.minutes); return; }
+  if (msg.type === "cancel") { cancelCommand(msg.rid, msg.by); return; }
   if (msg.type === "ui-resize") {
     const w = Math.max(PANEL.minW, Math.min(PANEL.maxW, Math.round(msg.w || PANEL.w))), h = Math.max(PANEL.minH, Math.min(PANEL.maxH, Math.round(msg.h || PANEL.h)));
     figma.ui.resize(w, h);
-    if (msg.save) { try { figma.clientStorage.setAsync("panelSize", { w: w, h: h }); } catch (e) { /* no storage */ } }
+    if (msg.save) saveStore("panelSize", { w: w, h: h });
     return;
   }
   if (msg.type === "ui-focus") { showNodes(msg.ids || []).catch(function () { }); return; }
@@ -3187,7 +3431,14 @@ figma.ui.onmessage = function (msg) {
   }
   if (msg.type !== "command") return;
   const write = isWrite(msg.command, msg.params);
-  if (write) { const run = function () { return runCommand(msg, true); }; writeChain = writeChain.then(run, run); return writeChain; }
+  if (write) {
+    QUEUED.set(msg.id, { cancelled: false });
+    if (pendingWrites > 0) progressOut(msg.id, { state: "queued" });
+    pendingWrites++;
+    const run = function () { return guarded(msg); };
+    writeChain = writeChain.then(run, run);
+    return writeChain;
+  }
   return runCommand(msg, false);
 };
 
@@ -3195,6 +3446,7 @@ figma.on("selectionchange", onSelectionChange);
 figma.on("currentpagechange", onPageChange);
 safe(function () { figma.on("stylechange", onStyleChange); });
 watchPage();
+loadPrefs();
 safe(cleanupTemp);
 setInterval(pollViewport, 1500);
 globalThis.__claudeBridge = { version: VERSION, handlers: handlers, activity: ACT, describe: H.describe };

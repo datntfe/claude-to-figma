@@ -12,17 +12,18 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost o
 
 - **Knows what you're working on.** Claude reads your selection (and the text you're editing), the part of the canvas on your screen, and what you did in the last minutes, so "fix this" and "make one like here" just work.
 - **Sees what you see.** `screenshot` exports a layer, the area around your selection, or exactly what's on your screen.
-- **You see what Claude did.** The plugin window lists every call with a plain summary ("Changed 6 layers"), a **Show** button that selects and zooms to the layers it touched, and a toast on the canvas after each change. Changes run one at a time, each one Cmd+Z. Switch off **Allow changes** to let Claude look but not touch, or **Save version** for a restore point.
+- **You see what Claude did, and decide what it may do.** The plugin window lists every call with a plain summary ("Changed 6 layers"), a **Show** button that selects and zooms to the layers it touched, and a toast on the canvas after each change. Changes run one at a time, each one Cmd+Z. Long changes show their progress with a **Cancel** button, and **Follow** scrolls the canvas to what Claude changes. Set the window to **Ask first** to approve each change on a card (or from the toast on the canvas), or **Look only** to let Claude look but not touch; each file remembers its setting.
+- **Long jobs don't break or run twice.** A call still running after about 45 seconds answers with a job id instead of timing out, and Claude picks up the result with `job`. The same call sent again joins the first instead of building everything twice, and stopping Claude drops the changes that haven't run yet.
 - **Reads designs for code.** `get_spec` returns a whole frame with CSS-ready values (px, fill/hug, flexbox, borders, shadows, typography, styled text runs), `{token}` names with their code syntax, components with their props, and repeated instances listed once, so Claude writes code that matches.
 - **New work lands beside yours.** Screens, images and instances Claude adds go to the right of what you selected or are looking at, never on top of your frames.
 - **Variables, styles and libraries.** Create and edit variables, modes and aliases, bind them to layers, create styles, use and import library components, styles and variables.
 - **Shaders.** List the shaders available to the file and apply them as a fill, stroke or effect, with their properties set by name (colours, numbers, points, gradients, variables).
-- **Tidy and polish, check designs.** `audit_design` finds default names, hard-coded values that match a variable, off-grid spacing, half pixels, low text contrast and more, and fixes the safe ones. `update_nodes` changes many layers in one go: text, styles, variants, auto layout, prototype links.
+- **Tidy and polish, check designs.** `audit_design` finds default names, hard-coded values that match a variable, off-grid spacing, half pixels, low text contrast, text that doesn't fit its box and more, and fixes the safe ones. `update_nodes` changes many layers in one go: text, styles, variants, auto layout, prototype links.
 - **Your computer too.** Put images from a folder or a link into the design, and export icons and screens straight into a code project.
 - **Several files at once.** Keep the plugin open in a library file and a product file together; Claude works in both.
 - **Quick actions.** Ready-made prompts (Tidy and polish, Check design, Generate a design, Rewrite or translate text, Edit variables, Make a prototype, Hand off to code, Edit a library).
 - **Full Plugin API.** Anything a Figma plugin can do, Claude can do through `run_code`.
-- **Light on Claude's context.** 23 tools in about 7K tokens (tool-by-tool MCP servers often take 25K+), compact results capped at about 20K tokens with a note saying how to get the rest, and read-only tools marked so you can always allow them.
+- **Light on Claude's context.** 24 tools in about 7K tokens (tool-by-tool MCP servers often take 25K+), compact results capped at about 20K tokens with a note saying how to get the rest, reads that answer just "unchanged" when nothing changed, a picture of the result in the same answer as a change (`look: true`), and read-only tools marked so you can always allow them.
 - **No dependencies, local only.** The server is one Node.js file (Node 18+) that listens on `127.0.0.1` / `::1`; the plugin is plain JavaScript. Several Claude windows (desktop, Cowork, Claude Code) share one connection.
 
 ---
@@ -175,7 +176,7 @@ Import the **manifest from this repo**. Don't create a new plugin with Figma's "
 
 ### 4. Check that everything works
 
-1. With Claude open, visit <http://localhost:3055> in a browser. You should see `Claude Figma bridge 1.3.0 is running. Plugin connected: no`.
+1. With Claude open, visit <http://localhost:3055> in a browser. You should see `Claude Figma bridge 1.5.0 is running. Plugin connected: no`.
 2. In Figma, run **Plugins → Development → Claude Bridge**. The dot turns **green**: "Connected: Claude can work in “your file”."
 3. Reload the browser page. It should now say `Plugin connected: yes`.
 4. Ask Claude *"Check the Figma bridge status."* It answers with your file and page name.
@@ -196,9 +197,11 @@ The plugin window shows:
 | 🟢 green dot | Connected to the bridge |
 | 🟠 amber dot | Connecting |
 | 🔴 red dot | Not connected. It retries every 2 seconds on its own. |
-| Timeline | One row per call: a plain summary ("Created 14 layers", "Read the design (32 layers)"), duration and time. Changes carry "↶ 1 undo"; reads are dimmed. Click a row to see the request and the result. |
+| **Allow changes** · **Ask first** · **Look only** | What Claude may do in this file; each file remembers its choice. *Ask first*: every change waits on a card that says what it will do ("Create 9 layers: “Order list – empty” …") with **Allow**, **Deny**, **Show** (the layers it will change), **Details** (the request or the code) and **Allow for 10 min**; the toast on the canvas has an **Allow** button too. A change nobody answers is dropped when Claude stops waiting (up to 5 minutes). *Look only*: Claude can look but every change is refused, with a message telling Claude to ask you. |
+| Timeline | One row per call: a plain summary ("Created 14 layers", "Read the design (32 layers)"), duration and time. Changes carry "↶ 1 undo"; reads are dimmed. Click a row to see the request and the result. When several Claude windows work in the file, each row says which one sent it. |
+| Running rows | Say what they wait for ("Waiting for the change before it", "Waiting for your OK") or how far they are ("12 of 40 · Renaming layers", with a progress bar), and how long it's been. **Cancel** drops a change that hasn't started, or stops a running one at its next step. |
 | **Show** | Selects the layers a call touched and zooms to them (at most 400%). The toast Figma shows after each change has the same button. |
-| **Allow changes** | Off: Claude can still look at this file but every change is refused, with a message telling Claude to ask you. |
+| **Follow** | Scrolls the canvas to what Claude changes, without touching your selection or zooming in. |
 | **Changes only** | Hides the reads in the timeline. |
 | **Save version** | Saves "Before Claude · 14:32" in the file's version history. |
 | Copy log · Port · Reconnect | Copy the timeline as text, change the port, or force a reconnect. |
@@ -258,23 +261,28 @@ Claude sees these tools. With some clients they're prefixed with the server name
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `status` | — | Is the plugin connected? `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (count), `plugin_version`, the open `files` when there are several, and `notes` when something needs updating. |
+| `status` | — | Is the plugin connected? `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (count), `plugin_version`, the open `files` when there are several, `paused` (Look only) or `ask_first`, and `notes` when something needs updating. |
+| `job` | `id`, `wait` (seconds, default 40), `cancel` | Calls still running after about 45 s answer with `{ job: "j3", status, progress }` instead of a result. `job` waits for it and returns the result; `cancel: true` drops a change that hasn't run yet (queued or waiting for your OK) or stops a running one at its next step. No `id`: the recent jobs. |
 | `get_context` | `activity` (default 15), `since_seconds`, `depth` (default 2), `max_layers` | What you're looking at and doing: file, page, selection (and text being edited), the viewport (zoom, bounds, the frame in focus at the centre of the screen, the layers in view) and recent activity (select, edit, create, delete, page, viewport, styles; by you, a collaborator or Claude). |
-| `get_selection` | `depth` (default 1), `brief` | Full details of each selected layer: path, position, size, fills/strokes as hex, radius, effects, auto layout and sizing, text and typography, styles, bound variables, variable modes, component info (main component, variant, key, library or local, property values), plus the colours in the selection. |
+| `get_selection` | `depth` (default 1), `brief`, `since` | Full details of each selected layer: path, position, size, fills/strokes as hex, radius, effects, auto layout and sizing, text and typography, styles, bound variables, variable modes, component info (main component, variant, key, library or local, property values), plus the colours in the selection. |
 | `screenshot` | `node_id`, `viewport`, `scale`, `max_size` (default 1600) | An image of a layer; or with `viewport: true` exactly what's on your screen. No arguments: the selected layer, the area around several selected layers, or your screen. |
-| `get_spec` | `node_id` or `ids` (default: selection, else the frame on screen), `depth`, `max_nodes` (default 350), `force`, `include_hidden`, `dedupe` | One deep read for writing code: every layer with CSS-ready values, `{token}` names, components, styled text runs, icons as single layers, repeated instances once, plus tables of tokens (code syntax, value per mode), styles and components. Too big → a plan of sections. See [below](#get_spec-for-code). |
-| `get_tree` | `node_id`, `depth` (default 2), `max_nodes` (default 400) | Layer tree of a node, or of the current page, level by level; `more` marks where layers were left out. |
-| `find_nodes` | `scope` (page/selection/file) or `node_id`, `type`, `name`, `text`, `component`, `limit`, `offset` | Search layers by type, name (or `/regex/`), text content or component; flat list with ids, paths, text, fonts and text styles. `next_offset` pages through long lists. |
+| `get_spec` | `node_id` or `ids` (default: selection, else the frame on screen), `depth`, `max_nodes` (default 350), `force`, `include_hidden`, `dedupe`, `since` | One deep read for writing code: every layer with CSS-ready values, `{token}` names, components, styled text runs, icons as single layers, repeated instances once, plus tables of tokens (code syntax, value per mode), styles and components. Too big → a plan of sections. See [below](#get_spec-for-code). |
+| `get_tree` | `node_id`, `depth` (default 2), `max_nodes` (default 400), `since` | Layer tree of a node, or of the current page, level by level; `more` marks where layers were left out. |
+| `find_nodes` | `scope` (page/selection/file) or `node_id`, `type`, `name`, `text`, `component`, `limit`, `offset`, `since` | Search layers by type, name (or `/regex/`), text content or component; flat list with ids, paths, text, fonts and text styles. `next_offset` pages through long lists. |
 | `list_pages` | — | All pages, plus the current one. |
+
+These reads (and `get_variables`, `get_library`) answer with an `etag`. Passing it back as `since` returns only `{ "unchanged": true }` when nothing changed, so checking again costs almost nothing.
 
 **Changing things**
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, `shader`, any other property, remove. |
-| `audit_design` | `node_id` or `scope`, `checks`, `fix`, `grid` (default 4) | Design check: default names, values that match a variable, hard-coded colours, text without style, half pixels, off-grid spacing, WCAG contrast, small tap targets, hidden/empty layers, frames without auto layout. `fix: ["bind","round","autolayout"]` applies the safe fixes. |
-| `build` | `spec` (object or array), `parent_id`, `position` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes, shaders and prototype links. On the page without x/y, new layers go beside your work (`position: "auto"`, default), in the middle of the screen (`"viewport"`) or at 0,0 (`"origin"`). |
-| `run_code` | `code` (string, required), `timeout_ms` (default 60000) | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
+| `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version`, `look` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, `shader`, any other property, remove. |
+| `audit_design` | `node_id` or `scope`, `checks`, `fix`, `grid` (default 4) | Design check: default names, values that match a variable, hard-coded colours, text without style, half pixels, off-grid spacing, WCAG contrast, small tap targets, `overflow` (text running out of its box, layers sticking out of their auto layout frame, text cut off by a clipping frame; measured from what Figma rendered, nothing is changed), hidden/empty layers, frames without auto layout. `fix: ["bind","round","autolayout"]` applies the safe fixes. |
+| `build` | `spec` (object or array), `parent_id`, `position`, `look` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes, shaders and prototype links. On the page without x/y, new layers go beside your work (`position: "auto"`, default), in the middle of the screen (`"viewport"`) or at 0,0 (`"origin"`). |
+| `run_code` | `code` (string, required), `timeout_ms` (default 60000), `look` | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
+
+`look: true` on `build`, `update_nodes` and `run_code` adds a picture of the frames that changed (up to 1000 px) to the answer, so Claude checks its work without another call.
 | `set_page` | `page_id` or `name`, `create` | Switches page. With `create: true`, a missing page is created. |
 | `delete_nodes` | `ids` | Deletes layers. Pages and the document are never deleted. |
 | `focus` | `ids` | Switches to the right page, selects the layers and zooms the viewport to them. |
@@ -283,10 +291,10 @@ Claude sees these tools. With some clients they're prefixed with the server name
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit`, `offset` | Local collections, modes and every value per mode (hex colours, `{aliases}`), scopes, code syntax; with `library: true` also the variables of enabled libraries (with keys). |
+| `get_variables` | `collection`, `query`, `type`, `library`, `values`, `ids`, `limit`, `offset`, `since` | Local collections, modes and every value per mode (hex colours, `{aliases}`), scopes, code syntax; with `library: true` also the variables of enabled libraries (with keys). |
 | `set_variables` | `ops`, `save_version` | Batch: create/rename/delete collections and modes, create or update variables (values per mode, aliases, scopes, code syntax, description, hidden), rename, delete. Stops at the first error and reports before → after values. |
 | `bind_variables` | `bindings`, `modes`, `save_version` | Bind variables (local or library, by name) to fills, strokes, sizes, spacing, padding, radius, opacity, visibility, text and typography; set or reset a frame's mode per collection. |
-| `get_library` | `kind`, `query`, `used_remote`, `limit` | Local styles with values, local components and sets (keys, variants, properties), variable collections (local and library), shaders (with their properties once imported), and the library components used on the page. |
+| `get_library` | `kind`, `query`, `used_remote`, `limit`, `since` | Local styles with values, local components and sets (keys, variants, properties), variable collections (local and library), shaders (with their properties once imported), and the library components used on the page. |
 | `set_styles` | `ops`, `save_version` | Create, update, rename or delete paint, text, effect and grid styles; bind style colours and typography to variables. |
 | `import_from_library` | `kind`, `key`, `place`, `variant`, `parent_id`, `x`, `y`, `position` | Import a published variable, style, component or component set by key; components are placed as instances. |
 
@@ -319,6 +327,7 @@ Claude sees these tools. With some clients they're prefixed with the server name
 | `await h.link(node, target, opts?)` | Prototype link (`'back'`, a node or id; `{ transition, duration }`) |
 | `await h.component(nameOrKey, variant?)` | A component to instantiate (local name or `key:…`) |
 | `await h.shader(node, spec)` | Applies a shader, as `shader` in `update_nodes` (`null` removes them) |
+| `h.progress(done, total?, text?)` | Shows progress in the plugin window ("12 of 40 · Cards"). If the user presses **Cancel**, the next call throws, so the loop stops there. |
 
 Return values are converted to JSON:
 
@@ -454,26 +463,19 @@ These notes are for people and agents writing code for the bridge. Most of them 
 - **Never call `figma.closePlugin()`.** It closes the bridge, and the user has to run the plugin again.
 - **Empty auto layout frames don't shrink.** A new frame is 100×100. If it has auto layout set to hug but **no children** (a spacer, for example), Figma keeps it at 100×100. Resize it first (`f.resize(0.01, 0.01)`) or give it a fixed size.
 - **`globalThis` persists while the plugin is open.** Store a helper library once (`globalThis.lib = { … }`) and reuse it in later calls instead of resending big code.
-- **Long jobs:** the default timeout is 60 s (`timeout_ms` raises it). Some clients also have their own limit. Cowork's link to your computer, for example, gives up after about 60 s. For long builds, start the work in the background and poll:
+- **Long jobs:** the default timeout is 60 s (`timeout_ms` raises it). Clients have their own limit too (Cowork's link to your computer gives up after about 60 s), so a call still running after about 45 s answers with a job id and Claude collects the result with `job`; don't start the work in the background yourself, because then it escapes the one-change-at-a-time queue and its undo step. In long loops call `h.progress(i, total, label)`: the user sees how far it is and can cancel.
 
   ```js
-  // call 1: start
-  globalThis.jobs = globalThis.jobs || {};
-  const job = (globalThis.jobs.build = { status: "running", started: Date.now() });
-  (async () => {
-    try { /* … long work … */ job.status = "done"; }
-    catch (e) { job.status = "error"; job.error = String(e); }
-  })();
-  return "started";
-  ```
-
-  ```js
-  // call 2, 3, …: check
-  return globalThis.jobs.build;
+  const cards = figma.currentPage.findAll((n) => n.name === "Card");
+  for (let i = 0; i < cards.length; i++) {
+    h.progress(i, cards.length, cards[i].name);   // throws if the user pressed Cancel
+    await h.update(cards[i], { radius: 12 });
+  }
+  return cards.length;
   ```
 - **Big payloads are fine.** Code over 300 KB and screenshots over 4 MB are tested. Still, sending a library once and reusing it is faster.
 - **Pages with newer node types:** reading `.children` on a page that contains node types the Plugin API doesn't support yet can throw (e.g. `unsupported type in createVMObject: SPEC_BLOCK`). If that happens, build on a new page and leave that page alone.
-- **Check visually.** After drawing, call `screenshot` with a `max_size` that fits the detail you need, look for overflow or clipping, then fix.
+- **Check visually.** Pass `look: true` (or call `screenshot` with a `max_size` that fits the detail you need), and run `audit_design` with `checks: ["overflow"]` to catch text that doesn't fit, then fix.
 
 ---
 
@@ -510,7 +512,11 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 
 **Screenshots of your screen.** To render exactly what's in view, the plugin puts a temporary rectangle (filled with the canvas colour) under everything on the page at the viewport bounds, exports it with `contentsOnly: false` (which draws every overlapping layer), and removes it right away.
 
-**Undo, one change at a time.** Changing commands run one after another in each file (reads don't wait), and the plugin calls `figma.commitUndo()` after each one, so every Claude action is exactly one Cmd+Z step even when several calls arrive together.
+**Undo, one change at a time.** Changing commands run one after another in each file (reads don't wait), and the plugin calls `figma.commitUndo()` after each one, so every Claude action is exactly one Cmd+Z step even when several calls arrive together. A change that never finishes (say, `run_code` awaiting something that never comes) holds the queue only until Claude has stopped waiting for it.
+
+**Ask first and cancel.** In *Ask first* the plugin shows the change on a card and waits; the bridge then gives a change up to 5 minutes (`FIGMA_BRIDGE_ASK_MS`) instead of the tool's timeout. A queued or waiting change can be cancelled from the panel, by `job` with `cancel: true`, or by the MCP client cancelling the request; it is then never applied. A running change stops at its next step (between items of `build` / `update_nodes`, or at `h.progress` in `run_code`); what it did before stays as one undo step.
+
+**Long calls.** MCP clients give up on a call after about a minute, and a change tried again would run twice. So a call still running after 45 s (`FIGMA_BRIDGE_SOFT_MS`) answers with a job id, and `job` waits for its result. The same tool with the same arguments, sent while it still runs or before its result was seen, joins it instead of running again. With a `progressToken`, the bridge also sends MCP progress notifications while it waits.
 
 **When the line drops or Figma is slow.** Command ids are random and an answer is only accepted from the file the command went to. A change that times out is reported as "may still have been applied"; if its answer arrives later, the next reply for that file says whether it landed. A change still waiting in the queue when Claude gives up is dropped, not applied late. A plugin that drops without closing gets 15 seconds to come back, and its calls carry on over the new connection; meanwhile changes without `file` don't go to the other open file. Each side pings every 20 seconds and a connection that answers nothing for a minute is closed.
 
@@ -534,8 +540,9 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 | *"Reading team libraries needs the teamlibrary permission"* | Same: re-run the plugin so Figma loads the updated `manifest.json`. |
 | *"macOS did not let Claude access …"* (images or exports) | Allow Claude in System Settings → Privacy & Security → Files and Folders, or use a folder directly in your home folder. |
 | A rectangle named *"Claude capture (temporary)"* stays on the page | A screen capture was interrupted. Delete it; the plugin also removes leftovers when it starts. |
-| `run_code` times out | Split the work or use the background-job pattern in [Writing good `run_code`](#writing-good-run_code). Also check that Figma isn't showing a modal dialog. A change that timed out may still land: the next reply says so when it does. |
-| Claude says *"Changes are paused in the Claude Bridge window"* | **Allow changes** is off in the plugin window of that file. Switch it back on. |
+| `run_code` times out | Long calls become jobs after 45 s and Claude gets the result with `job`; if `timeout_ms` itself runs out, split the work. Also check that Figma isn't showing a modal dialog. A change that timed out may still land: the next reply says so when it does. |
+| Claude says *"Changes are paused in the Claude Bridge window"* | The plugin window of that file is set to **Look only**. Set it to **Allow changes** or **Ask first**. |
+| Claude says *"nobody approved this change in Figma in time"* | The window is set to **Ask first** and the card wasn't answered. Answer the card, press **Allow for 10 min**, or set it to **Allow changes**. |
 | Text errors like *"unloaded font"* | Load the exact font family and style first. Use `figma.listAvailableFontsAsync()` to see what's installed. |
 | Tools don't show up in Claude | Claude desktop: check **Settings → Developer** for errors from `figma-bridge`. Claude Code: run `claude mcp list` and `/mcp`. Test the server by hand: `node server/index.js` (Ctrl+C to stop). |
 
@@ -557,7 +564,7 @@ Logs go to stderr with the `[figma-bridge]` prefix. stdout is reserved for MCP. 
 - An answer counts only from the file the command was sent to, command ids are random, a connection must say who it is within 10 seconds, and messages are capped at 256 MB.
 - Exports always stay inside the folder Claude was given, whatever the layer is called.
 - The plugin's manifest allows network access only to `localhost:3055` (`devAllowedDomains`). It can't reach the internet.
-- `run_code` lets Claude run **any** Plugin API code in the open file: read, change or delete layers. Use the bridge on files you're comfortable letting Claude edit, keep version history, and close the plugin when you're done.
+- `run_code` lets Claude run **any** Plugin API code in the open file: read, change or delete layers. Use the bridge on files you're comfortable letting Claude edit, keep version history, and close the plugin when you're done. For files that need care, set the window to **Ask first** (you see each change, and the code, before it runs) or **Look only**.
 - `place_image` reads the image file or link Claude is given, and `export_nodes` writes files into the folder Claude is given. Both run with your user's permissions on your computer, only when Claude calls them.
 - The activity log lives in the plugin's memory and disappears when you close the plugin.
 - Any program on your own computer that can reach `localhost:3055` could also send commands while the plugin is open. Close the plugin when you're not using it.
@@ -583,12 +590,13 @@ claude-to-figma/
 ├── figma-plugin/
 │   ├── manifest.json        Plugin manifest (dynamic-page, teamlibrary, localhost-only network access)
 │   ├── code.js              Main thread: runs commands with the Plugin API, keeps the activity log
-│   └── ui.html              Plugin window: WebSocket client, timeline with Show, Allow changes, resize
+│   └── ui.html              Plugin window: WebSocket client, timeline (Show, progress, Cancel), Allow / Ask first / Look only, Follow, resize
 ├── install-mac.sh           macOS installer for Claude desktop
 ├── test/
 │   ├── smoke.test.js        The server starts and lists its tools (runs on Node 18)
 │   ├── plugin.test.js       code.js handlers against a strict mock Figma API (variables, libraries, viewport, activity…)
 │   ├── server.test.js       MCP tools and prompts, several files, big payloads, local images and exports
+│   ├── jobs.test.js         Long calls as jobs, the same call joined, cancel, progress, etags, look, Ask first, through a relay
 │   ├── multi.test.js        hub + relays, failover, two files through relays, old-version detection
 │   └── ui-e2e.py            Full chain through ui.html in real Chromium (Playwright), two plugin windows
 └── package.json
@@ -601,25 +609,27 @@ npm test              # Node 22+ (uses the built-in WebSocket client)
 npm run test:ui       # optional, needs: pip install playwright && python -m playwright install chromium
 ```
 
-The tests use ports 3997–3999, so they don't touch a bridge running on 3055.
+The tests use ports 3996–3999, so they don't touch a bridge running on 3055.
 
 **Wire protocol** (server ↔ plugin UI, JSON text frames):
 
 ```jsonc
 // plugin → server, on connect
-{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.4.0", "session": "…" } }
+{ "type": "hello", "info": { "file": "…", "fileKey": "…", "page": "…", "editorType": "figma", "version": "1.5.0", "session": "…" } }
 // plugin → server, while open
-{ "type": "info", "info": { "page": "…" } }          // page changed (or { "paused": true })
+{ "type": "info", "info": { "page": "…" } }          // page changed (or { "paused": bool, "ask": bool })
 { "type": "activity", "what": "select" }               // the user did something here (at most once a second)
+{ "type": "progress", "rid": "6f1c…", "state": "queued" | "asking" | "running" | "stopping" | "overdue", "done": 12, "total": 40, "text": "…" }
 // server → plugin
-{ "id": "6f1c…", "command": "run_code", "params": { "code": "return 1" }, "deadline": 1760000000000 }   // deadline: changes only
+{ "id": "6f1c…", "command": "run_code", "params": { "code": "return 1" }, "deadline": 1760000000000, "by": "Claude Code ·4f" }   // deadline: changes only
+{ "type": "cancel", "rid": "6f1c…", "by": "claude" }
 // plugin → server
 { "type": "result", "id": "6f1c…", "ok": true, "result": { "value": 1, "logs": [] } }
 { "type": "result", "id": "6f1c…", "ok": false, "error": "message" }
-// plugin main thread → plugin window only (never forwarded): { "type": "done", "rid", "summary", "touched", "ms", "write" }
+// plugin main thread ↔ plugin window only (never forwarded): done, ask, asked, prefs, decide, mode, follow
 ```
 
-Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, command, params, timeout, target?, write? }` or `{ type: "status", id }`. They receive `{ type: "reply", id, ok, result | error, file?, files?, notes? }`.
+Relays connect to `ws://127.0.0.1:<port>/relay` and send `{ type: "call", id, command, params, timeout, target?, write?, by? }`, `{ type: "cancel", id }` or `{ type: "status", id }`. They receive `{ type: "progress", id, state, done?, total?, text? }` and `{ type: "reply", id, ok, result | error, file?, files?, notes? }`. Progress messages carry `rid`, not `id`, so a 1.4 hub ignores them.
 
 **Adding a command:**
 

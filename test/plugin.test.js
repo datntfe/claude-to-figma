@@ -348,7 +348,7 @@ for (const c of [libButtonM, libButtonL]) { c._props = { "Label#1:0": { type: "T
 
 const code = fs.readFileSync(path.join(__dirname, "..", "figma-plugin", "code.js"), "utf8");
 const intervals = [];
-const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout };
+const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout, clearTimeout };
 sandbox.globalThis = sandbox;
 vm.runInNewContext(code, sandbox);
 let mid = 0;
@@ -364,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.4.0"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.5.0"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.4.0"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.5.0"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -911,6 +911,184 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     console.log("panel timeline, toast + Show, resize, save version OK");
   }
 
+  /* 1.5: Ask first / Look only, approvals, cancel, progress, the queue watchdog */
+  {
+    const resultOf = (id) => toUI.find((m) => m.type === "result" && m.id === id);
+    const waitFor = async (pred, what) => { const t0 = Date.now(); while (!pred()) { if (Date.now() - t0 > 3000) throw new Error("timed out waiting for " + what); await new Promise((res) => setTimeout(res, 3)); } };
+    toUI.length = 0;
+    await uiHandler({ type: "mode", mode: "ask" });
+    assert.equal(figma._store["mode:Take-home.fig"], "ask", "the switch is remembered for this file");
+    assert.ok(toUI.find((m) => m.type === "info" && m.info.ask === true && m.info.paused === false), "the bridge hears about Ask first");
+    assert.ok(toUI.find((m) => m.type === "prefs" && m.mode === "ask"));
+    assert.equal(ok(await cmd("ping")).ask, true);
+    // a change waits for the OK: card in the panel, toast with Allow on the canvas
+    toUI.length = 0;
+    const p1 = uiHandler({ type: "command", id: "a1", command: "build", params: { spec: { type: "FRAME", name: "Asked frame", size: [50, 50] } } });
+    await waitFor(() => toUI.find((m) => m.type === "ask" && m.rid === "a1"), "ask a1");
+    const ask1 = toUI.find((m) => m.type === "ask");
+    assert.ok(/^Create 1 layer: “Asked frame”$/.test(ask1.text) && ask1.until > clock.t, JSON.stringify(ask1));
+    assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "a1" && m.state === "asking"));
+    const askToast = figma._toasts[figma._toasts.length - 1];
+    assert.ok(/^Claude wants to: Create 1 layer/.test(askToast.text) && askToast.opts.button.text === "Allow" && askToast.opts.timeout === Infinity);
+    assert.ok(!current.children.find((n) => n.name === "Asked frame"), "nothing happens before the OK");
+    await uiHandler({ type: "decide", rid: "a1", ok: true });
+    await p1;
+    const asked = current.children.find((n) => n.name === "Asked frame");
+    assert.ok(resultOf("a1").ok && asked && askToast.cancelled && toUI.find((m) => m.type === "asked" && m.rid === "a1" && m.ok));
+    // Deny
+    toUI.length = 0;
+    const p2 = uiHandler({ type: "command", id: "a2", command: "delete_nodes", params: { ids: [asked.id] } });
+    await waitFor(() => toUI.find((m) => m.type === "ask" && m.rid === "a2"), "ask a2");
+    const ask2 = toUI.find((m) => m.type === "ask");
+    assert.ok(/^Delete 1 layer: “Asked frame”$/.test(ask2.text) && ask2.targets[0] === asked.id, JSON.stringify(ask2));
+    await uiHandler({ type: "decide", rid: "a2", ok: false });
+    await p2;
+    assert.ok(/declined this change in Figma/.test(resultOf("a2").error) && all.get(asked.id));
+    // Allow on the toast
+    toUI.length = 0;
+    const p3 = uiHandler({ type: "command", id: "a3", command: "update_nodes", params: { items: [{ id: asked.id, name: "OK from the toast" }] } });
+    await waitFor(() => toUI.find((m) => m.type === "ask" && m.rid === "a3"), "ask a3");
+    assert.ok(/^Change 1 layer \(name\)$/.test(toUI.find((m) => m.type === "ask").text));
+    figma._toasts[figma._toasts.length - 1].opts.button.action();
+    await p3;
+    assert.equal(asked.name, "OK from the toast");
+    // Allow for 10 min
+    toUI.length = 0;
+    const p4 = uiHandler({ type: "command", id: "a4", command: "update_nodes", params: { items: [{ id: asked.id, name: "Grant 1" }] } });
+    await waitFor(() => toUI.find((m) => m.type === "ask" && m.rid === "a4"), "ask a4");
+    await uiHandler({ type: "decide", rid: "a4", ok: true, minutes: 10 });
+    await p4;
+    toUI.length = 0;
+    ok(await cmd("update_nodes", { items: [{ id: asked.id, name: "Grant 2" }] }));
+    assert.ok(!toUI.find((m) => m.type === "ask") && asked.name === "Grant 2", "no card while the 10 minutes last");
+    tick(11 * 60000);
+    // nobody answers before Claude stops waiting
+    toUI.length = 0;
+    await uiHandler({ type: "command", id: "a5", command: "update_nodes", deadline: clock.t + 30, params: { items: [{ id: asked.id, name: "Too slow" }] } });
+    assert.ok(/in time/.test(resultOf("a5").error) && asked.name === "Grant 2", resultOf("a5").error);
+    // Claude cancels while it waits
+    toUI.length = 0;
+    const p6 = uiHandler({ type: "command", id: "a6", command: "update_nodes", params: { items: [{ id: asked.id, name: "Cancelled" }] } });
+    await waitFor(() => toUI.find((m) => m.type === "ask" && m.rid === "a6"), "ask a6");
+    await uiHandler({ type: "cancel", rid: "a6", by: "claude" });
+    await p6;
+    assert.ok(/^Cancelled before it ran\. Nothing was changed\.$/.test(resultOf("a6").error) && asked.name === "Grant 2", resultOf("a6").error);
+    // switching to Allow changes lets the waiting change through
+    toUI.length = 0;
+    const p7 = uiHandler({ type: "command", id: "a7", command: "update_nodes", params: { items: [{ id: asked.id, name: "Via the switch" }] } });
+    await waitFor(() => toUI.find((m) => m.type === "ask" && m.rid === "a7"), "ask a7");
+    tick(5000);
+    emitNodeChange([{ type: "PROPERTY_CHANGE", id: asked.id, origin: "LOCAL", node: asked, properties: ["width"] }]);
+    assert.equal(sandbox.__claudeBridge.activity.filter((e) => e.what === "edit").pop().by, "user", "what the user does while a change waits for their OK is theirs");
+    await uiHandler({ type: "mode", mode: "allow" });
+    await p7;
+    assert.equal(asked.name, "Via the switch");
+    // Look only
+    await uiHandler({ type: "mode", mode: "off" });
+    let r = await cmd("update_nodes", { items: [{ id: asked.id, name: "Blocked" }] });
+    assert.ok(!r.ok && /Look only/.test(r.error) && asked.name === "Via the switch");
+    assert.equal(figma._store["mode:Take-home.fig"], "off");
+    assert.ok(ok(await cmd("ping")).paused && !ok(await cmd("ping")).ask);
+    await uiHandler({ type: "mode", mode: "allow" });
+    console.log("Ask first (card, toast, deny, 10 min, expiry, cancel, switch), Look only OK");
+
+    // a queued change can be cancelled; a running one stops at h.progress; a stuck one doesn't hold the queue
+    let release;
+    sandbox.__gate = new Promise((res) => { release = res; });
+    sandbox.__tick = tick;
+    toUI.length = 0;
+    const q1 = uiHandler({ type: "command", id: "c1", command: "run_code", params: { code: "await globalThis.__gate; return 'first'" } });
+    const q2 = uiHandler({ type: "command", id: "c2", command: "update_nodes", params: { items: [{ id: asked.id, name: "Never" }] } });
+    assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "c2" && m.state === "queued"), "the panel shows it waits for the change before it");
+    await uiHandler({ type: "cancel", rid: "c2" });
+    release();
+    await Promise.all([q1, q2]);
+    assert.equal(resultOf("c1").result.value, "first");
+    assert.ok(/^Cancelled before it ran \(by the user in Figma\)\. Nothing was changed\.$/.test(resultOf("c2").error) && asked.name === "Via the switch");
+    toUI.length = 0;
+    sandbox.__gate = new Promise((res) => { release = res; });
+    const pc = uiHandler({ type: "command", id: "c3", command: "run_code", params: { code: "for (let i = 0; i < 10; i++) { globalThis.__tick(200); h.progress(i, 10, 'Step ' + i); if (i === 2) await globalThis.__gate; } return 'all'" } });
+    await waitFor(() => toUI.find((m) => m.type === "progress" && m.rid === "c3" && m.done === 2 && m.total === 10 && m.text === "Step 2"), "progress 2/10");
+    await uiHandler({ type: "cancel", rid: "c3" });
+    assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "c3" && m.state === "stopping"));
+    release();
+    await pc;
+    assert.ok(/^Stopped part way through/.test(resultOf("c3").error), resultOf("c3").error);
+    const t1 = figma.createText(), t2 = figma.createText(), t3 = figma.createText();
+    const realLoad = figma.loadFontAsync;
+    let loads = 0;
+    figma.loadFontAsync = async (f) => { loads++; await new Promise((res) => setTimeout(res, 20)); fonts.add(f.family + f.style); };
+    toUI.length = 0;
+    const pu = uiHandler({ type: "command", id: "c4", command: "update_nodes", params: { items: [{ id: t1.id, text: "A" }, { id: t2.id, text: "B" }, { id: t3.id, text: "C" }] } });
+    await waitFor(() => loads >= 1, "first font load");
+    await uiHandler({ type: "cancel", rid: "c4" });
+    await pu;
+    figma.loadFontAsync = realLoad;
+    const ru = resultOf("c4").result;
+    assert.ok(ru.stopped && /after 1 of 3/.test(ru.stopped) && t1.characters === "A" && t2.characters === "" && t3.characters === "", JSON.stringify(ru));
+    assert.ok(/Changed 1 layer · stopped/.test(toUI.find((m) => m.type === "done" && m.rid === "c4").summary));
+    toUI.length = 0;
+    const t0 = Date.now();
+    sandbox.__gate = new Promise(() => { });   // never settles
+    uiHandler({ type: "command", id: "w1", command: "run_code", deadline: clock.t + 10, params: { code: "await globalThis.__gate" } });
+    await uiHandler({ type: "command", id: "w2", command: "update_nodes", params: { items: [{ id: asked.id, name: "After the stuck one" }] } });
+    assert.equal(asked.name, "After the stuck one");
+    assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "w1" && m.state === "overdue") && Date.now() - t0 < 5000);
+    console.log("cancel (queued, running with h.progress, batch), progress, stuck change watchdog OK");
+
+    // reads no longer make the user's own edits look like Claude's
+    tick(5000);
+    ok(await cmd("get_spec", { node_id: asked.id }));
+    emitNodeChange([{ type: "PROPERTY_CHANGE", id: asked.id, origin: "LOCAL", node: asked, properties: ["x"] }]);
+    let ev = ok(await cmd("get_context", { activity: 5 })).activity.events.filter((e) => e.what === "edit").pop();
+    assert.equal(ev.by, "user", JSON.stringify(ev));
+    tick(5000);
+    ok(await cmd("focus", { ids: [asked.id] }));
+    emitNodeChange([{ type: "PROPERTY_CHANGE", id: t1.id, origin: "LOCAL", node: t1, properties: ["y"] }]);
+    ev = ok(await cmd("get_context", { activity: 5 })).activity.events.filter((e) => e.what === "edit").pop();
+    assert.equal(ev.by, "claude", "right after focus it is still Claude's doing");
+    tick(5000);
+
+    // Follow: the canvas scrolls to what Claude changes, the selection stays
+    await uiHandler({ type: "follow", on: true });
+    assert.equal(figma._store.follow, true);
+    viewport.center = { x: 0, y: 0 }; viewport.zoom = 1; current.selection = [];
+    const far = ok(await cmd("build", { spec: { type: "FRAME", name: "Far away", x: 5000, y: 3000, size: [100, 100] } }));
+    await new Promise((res) => setTimeout(res, 5));
+    assert.deepEqual(viewport.center, { x: 5050, y: 3050 }); assert.equal(viewport.zoom, 1); assert.equal(current.selection.length, 0);
+    viewport.center = { x: 5000, y: 3000 };
+    ok(await cmd("update_nodes", { items: [{ id: far.roots[0].id, name: "In view" }] }));
+    await new Promise((res) => setTimeout(res, 5));
+    assert.deepEqual(viewport.center, { x: 5000, y: 3000 }, "already in view: no jump");
+    await uiHandler({ type: "follow", on: false });
+    console.log("activity attribution, Follow OK");
+
+    // look: true sends a picture of the screen that changed
+    const lr = ok(await cmd("build", { spec: { type: "FRAME", name: "Look at me", size: [300, 200] }, look: true }));
+    assert.ok(lr.look && lr.look.base64 && lr.look.id === lr.roots[0].id && lr.look.width === 300, JSON.stringify(lr.look));
+    const inner = ok(await cmd("build", { parent_id: lr.roots[0].id, spec: { type: "RECTANGLE", name: "Inner", size: [10, 10] }, look: true }));
+    assert.equal(inner.look.id, lr.roots[0].id, "a change inside a screen shows the whole screen");
+    const done = toUI.find((m) => m.type === "done");
+    assert.ok(!/"base64":"[A-Za-z0-9+/]/.test(done.preview), "the panel doesn't carry the picture");
+
+    // overflow: text running out of its box, layers sticking out of auto layout, text cut off
+    const card = figma.createFrame(); card.name = "Card"; card.x = 9000; card.y = 0; card.resize(200, 100); card.clipsContent = true;
+    const row = figma.createFrame(); row.name = "Row"; card.appendChild(row); row.layoutMode = "HORIZONTAL"; row.resize(100, 40);
+    const wide = figma.createRectangle(); wide.name = "Wide chip"; row.appendChild(wide); wide.resize(140, 40);
+    const long = figma.createText(); long.name = "Long copy"; card.appendChild(long); long.textAutoResize = "NONE"; long.resize(180, 20); long.fontSize = 14;
+    Object.defineProperty(long, "absoluteRenderBounds", { get() { const b = this.absoluteBoundingBox; return { x: b.x, y: b.y, width: b.width, height: b.height + 34 }; } });
+    const cut = figma.createText(); cut.name = "Cut label"; card.appendChild(cut); cut.x = 150; cut.y = 50; cut.resize(120, 20);
+    const fine = figma.createText(); fine.name = "Fine"; card.appendChild(fine); fine.resize(50, 20);
+    const ar = ok(await cmd("audit_design", { node_id: card.id, checks: ["overflow"] }));
+    const msgs = ar.issues.map((i) => i.layer + ": " + i.message);
+    assert.ok(msgs.some((m) => /^Wide chip: Doesn't fit in “Row” \(auto layout\): sticks out 40px$/.test(m)), msgs.join("\n"));
+    assert.ok(msgs.some((m) => /^Long copy: Text runs 34px below its box/.test(m)), msgs.join("\n"));
+    assert.ok(msgs.some((m) => /^Cut label: Cut off by “Card”: 70px/.test(m)), msgs.join("\n"));
+    assert.equal(ar.issues.length, 3, msgs.join("\n"));
+    ok(await cmd("delete_nodes", { ids: [asked.id, t1.id, t2.id, t3.id, far.roots[0].id, lr.roots[0].id, card.id] }));
+    console.log("look, overflow check OK");
+  }
+
   /* 1.4: new work lands beside the user's work, overlapping nothing */
   {
     const anchor = figma.createFrame(); anchor.name = "Current screen"; anchor.x = 5000; anchor.y = 300; anchor.resize(375, 812);
@@ -1030,7 +1208,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.4.0");
+  assert.equal(sandbox.__claudeBridge.version, "1.5.0");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });

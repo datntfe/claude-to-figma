@@ -7,7 +7,7 @@
 #      python3 test/ui-e2e.py
 #
 # Uses its own port (default 3997) so it never touches a bridge you have running on 3055.
-import json, os, subprocess, sys, tempfile, time
+import json, os, subprocess, sys, tempfile, threading, time
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -50,12 +50,32 @@ tmp.close()
 # Stands in for figma-plugin/code.js: answers ui-ready with hello and echoes commands with its file name.
 SIM = """
 window.__file = %s;
+function post(x) { window.postMessage({ pluginMessage: x }, '*'); }
+function finish(m, ok, result, summary) {
+  post(ok ? { type: 'result', id: m.id, ok: true, result: result } : { type: 'result', id: m.id, ok: false, error: result });
+  post({ type: 'done', rid: m.id, command: m.command, ok: ok, ms: 1500, write: true, summary: summary, touched: [], preview: '' });
+}
 window.addEventListener('message', function (ev) {
   var m = ev.data && ev.data.pluginMessage; if (!m) return;
-  if (m.type === 'ui-ready') window.postMessage({ pluginMessage: { type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.4.0', session: window.__file } } }, '*');
+  if (m.type === 'ui-ready') { post({ type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.5.0', session: window.__file } }); post({ type: 'prefs', mode: 'allow', follow: false }); }
+  /* Ask first: build waits for the OK in the panel */
+  if (m.type === 'command' && m.command === 'build') {
+    window.__asked = m;
+    post({ type: 'progress', rid: m.id, state: 'asking' });
+    post({ type: 'ask', rid: m.id, command: 'build', text: 'Create 3 layers: “Checkout”', detail: 'spec: …', targets: ['1:2'], until: Date.now() + 125000 });
+    return;
+  }
+  if (m.type === 'decide') { (window.__panel = window.__panel || []).push(m); post({ type: 'asked', rid: m.rid, ok: m.ok }); finish(window.__asked, m.ok, m.ok ? { created: 3 } : 'The user declined this change in Figma.', 'Created 3 layers'); return; }
+  /* a long run_code reports progress and can be cancelled */
+  if (m.type === 'command' && m.command === 'run_code' && m.params.code === 'progress') {
+    window.__long = m;
+    post({ type: 'progress', rid: m.id, state: 'running', done: 3, total: 10, text: 'Cards' });
+    return;
+  }
+  if (m.type === 'cancel') { (window.__panel = window.__panel || []).push(m); post({ type: 'progress', rid: m.rid, state: 'stopping' }); setTimeout(function () { finish(window.__long, false, 'Stopped part way through (cancelled).', ''); }, 50); return; }
   if (m.type === 'command') {
     var result = m.command === 'run_code' ? { value: 'ran ' + m.params.code.length + ' chars in ' + window.__file, logs: [] }
-      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.4.0' }
+      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.5.0' }
       : { echo: m.command, file: window.__file };
     setTimeout(function () {
       window.postMessage({ pluginMessage: { type: 'result', id: m.id, ok: true, result: result } }, '*');
@@ -63,7 +83,7 @@ window.addEventListener('message', function (ev) {
         summary: m.command === 'run_code' ? 'Ran code' : 'Read', touched: m.command === 'run_code' ? ['12:34'] : [], preview: JSON.stringify(result) } }, '*');
     }, 10);
   }
-  if (m.type === 'ui-focus' || m.type === 'allow' || m.type === 'ui-save-version') (window.__panel = window.__panel || []).push(m);
+  if (m.type === 'ui-focus' || m.type === 'mode' || m.type === 'follow' || m.type === 'ui-save-version') (window.__panel = window.__panel || []).push(m);
 });
 """
 ok = True
@@ -89,14 +109,46 @@ try:
         print("timeline:", row.replace("\n", " | "))
         ok &= "↶ 1 undo" in row and "Show" in row
         pg.click("text=Show")
-        pg.click("#allow")
+        pg.select_option("#mode", "off")
+        pg.check("#follow")
         time.sleep(0.2)
         panel = pg.evaluate("window.__panel || []")
         print("panel messages:", panel)
         ok &= any(m.get("type") == "ui-focus" and m.get("ids") == ["12:34"] for m in panel)
-        ok &= any(m.get("type") == "allow" and m.get("on") is False for m in panel)
-        ok &= "Changes paused" in pg.inner_text("#status")
-        pg.click("#allow")
+        ok &= any(m.get("type") == "mode" and m.get("mode") == "off" for m in panel)
+        ok &= any(m.get("type") == "follow" and m.get("on") is True for m in panel)
+        ok &= "Look only" in pg.inner_text("#status")
+        pg.select_option("#mode", "ask")
+        ok &= "Ask first" in pg.inner_text("#status")
+
+        # Ask first: the change waits on a card; Allow lets it through
+        out = {}
+        th = threading.Thread(target=lambda: out.update(build=tool("build", {"spec": {"type": "FRAME", "name": "Checkout"}})))
+        th.start()
+        pg.wait_for_selector("#asks .ask", timeout=4000)
+        card = pg.inner_text("#asks")
+        print("ask card:", card.replace("\n", " | "))
+        ok &= "Claude wants to:" in card and "Create 3 layers" in card and "Allow for 10 min" in card and "left" in card
+        ok &= "Waiting for your OK" in pg.inner_text("#log")
+        pg.click("#asks .ask button.primary")
+        th.join(10)
+        print("build after OK:", out.get("build", "").replace("\n", " ")[:120])
+        ok &= '"created":3' in out.get("build", "") and pg.query_selector("#asks .ask") is None
+        ok &= any(m.get("type") == "decide" and m.get("ok") is True for m in pg.evaluate("window.__panel"))
+
+        # progress bar and Cancel on a long change
+        th = threading.Thread(target=lambda: out.update(long=tool("run_code", {"code": "progress"})))
+        th.start()
+        pg.wait_for_function("document.getElementById('log').innerText.includes('3 of 10')", timeout=4000)
+        bar = pg.evaluate("getComputedStyle(document.querySelector('.pending .bar')).display + ' ' + document.querySelector('.pending .bar > i').style.width")
+        print("progress:", bar)
+        ok &= bar == "block 30%"
+        pg.click(".pending button.cancel")
+        th.join(10)
+        print("cancelled:", out.get("long", "").replace("\n", " ")[:120])
+        ok &= "Stopped part way" in out.get("long", "")
+        ok &= any(m.get("type") == "cancel" for m in pg.evaluate("window.__panel"))
+        pg.select_option("#mode", "allow")
 
         # A second Figma file opens the plugin too: both stay connected.
         pg2 = b.new_page()

@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.0
+
+Two things only: a better view and better control in the Claude Bridge window, and a sturdier link for Claude to work through.
+
+**In the Claude Bridge window**
+
+- **Allow changes · Ask first · Look only.** *Ask first* puts each change on a card before it runs: what it will do ("Create 9 layers: “Order list – empty” …"), **Allow**, **Deny**, **Show** (the layers it will change), **Details** (the request, or the code for `run_code`), **Allow for 10 min**, and the time left. The toast on the canvas has **Allow** too. *Look only* replaces the old Allow changes switch. Each file remembers its choice (it used to reset to on at every run). `status` tells Claude which one is set.
+- **Progress and Cancel.** A change that waits says what for ("Waiting for the change before it", "Waiting for your OK"). A running one shows how far it is ("12 of 40 · Renaming layers") with a progress bar and the time so far. **Cancel** drops a change that hasn't started, or stops a running one at its next step (between `build` / `update_nodes` items, or at `h.progress` in `run_code`); what it did stays as one undo step, and the result says "stopped".
+- **Follow.** The canvas scrolls to what Claude changes. Your selection stays, and it never zooms in.
+- **Which Claude.** When several Claude windows work in a file, each row says which one sent it ("Claude Code ·4f").
+
+**For Claude**
+
+- **Long calls don't break or run twice.** A call still running after 45 seconds (`FIGMA_BRIDGE_SOFT_MS`) answers with a job id and its progress, and the new `job` tool waits for the result or cancels it. Before, clients gave up after about a minute (Cowork sooner) and a retried `build` drew everything twice. The same call sent again while it runs, or before its result was seen, now joins it instead. When the client cancels a request (you stop Claude), changes that haven't run are dropped and no answer is sent. With a `progressToken`, MCP progress notifications go out while it waits.
+- **`look: true`** on `build`, `update_nodes` and `run_code` returns a picture of the frames that changed in the same answer.
+- **`since`: reads that cost nothing when nothing changed.** `get_selection`, `get_spec`, `get_tree`, `find_nodes`, `get_variables` and `get_library` answer with an `etag`; with `since: <etag>` they return just `{ "unchanged": true }`.
+- **`audit_design` checks `overflow`:** text running out of its box (measured from what Figma rendered), layers sticking out of their auto layout frame, and text cut off by a clipping frame. Nothing is changed to measure it.
+- **`h.progress(done, total, text)`** for `run_code`: the user sees it and can cancel.
+- In *Ask first* a change may wait up to 5 minutes for the OK (`FIGMA_BRIDGE_ASK_MS`).
+
+**Fixes**
+
+- A `run_code` that never finishes no longer holds up every change after it: the queue moves on once Claude has stopped waiting.
+- Reads no longer make your own edits look like Claude's in the activity log; only changes (and `focus` / `set_page`) count, and only while they run, not while they wait for your OK.
+- `export_nodes` is marked as able to overwrite files (`destructiveHint`), since `overwrite: true` replaces them.
+- The server answers `initialize` with a protocol version it knows instead of echoing any version.
+- README: the version shown at <http://localhost:3055>, and the "start work in the background" pattern for long `run_code` (it escaped the queue and its undo step) is replaced by jobs and `h.progress`.
+- 1.4 hubs and plugins keep working: progress messages carry `rid`, so older hubs ignore them.
+
 ## 1.4.0
 
 A review council compared the bridge with [figwright](https://github.com/awdr74100/figwright) (MIT) and picked what makes it better for designers: you see and control what Claude does, reads for code go deep, and the connection holds up.
