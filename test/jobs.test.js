@@ -8,7 +8,15 @@ const fs = require("fs");
 const os = require("os");
 const PORT = Number(process.env.TEST_PORT_JOBS || 3996);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-jobs-"));
-const ENV = Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_SOFT_MS: "1000", FIGMA_BRIDGE_ASK_MS: "200000", FIGMA_BRIDGE_LOG: path.join(HOME, "bridge.log") });
+const ENV = Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_SOFT_MS: "1000", FIGMA_BRIDGE_ASK_MS: "200000", FIGMA_BRIDGE_LOG: path.join(HOME, "bridge.log"), FIGMA_BRIDGE_API: "http://127.0.0.1:" + (PORT - 3) });
+/* stands in for api.figma.com */
+const apiSeen = [];
+require("http").createServer((req, res) => {
+  apiSeen.push({ url: req.url, token: req.headers["x-figma-token"] });
+  if (req.headers["x-figma-token"] !== "figd_t") { res.writeHead(403); return res.end('{"err":"Invalid token"}'); }
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ comments: [{ id: "c1", parent_id: "", message: "Hi", user: { handle: "Lan" } }] }));
+}).listen(PORT - 3, "127.0.0.1");
 const LOG = path.join(HOME, "bridge.log");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -38,7 +46,7 @@ const txt = (r) => r.content.find((x) => x.type === "text").text;
 const json = (r) => JSON.parse(txt(r).replace(/^\[[^\n]*\]\n/, ""));
 
 /* a fake Claude Bridge plugin: holds builds and updates until the test answers them */
-const info = { file: "Jobs file", page: "Page 1", editorType: "figma", version: "1.5.1", session: "sJ" };
+const info = { file: "Jobs file", page: "Page 1", editorType: "figma", version: "1.6.0", session: "sJ" };
 const held = [], cancels = [];
 let selection = { count: 1, selection: [{ id: "1:2", name: "Card" }] };
 let dropNextRead = false;
@@ -52,8 +60,9 @@ function fakePlugin() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === "cancel") { cancels.push(m); return; }
-    if (m.command === "ping") return p.answer(m, { file: info.file, page: "Page 1", editorType: "figma", selection: 1, version: "1.5.1" });
+    if (m.command === "ping") return p.answer(m, { file: info.file, page: "Page 1", editorType: "figma", selection: 1, version: "1.6.0" });
     if (m.command === "get_selection") { if (dropNextRead) { dropNextRead = false; ws.close(); return; } return p.answer(m, JSON.parse(JSON.stringify(selection))); }
+    if (m.command === "get_comments") return p.answer(m, m.params.raw ? { threads: m.params.raw.comments.map((c) => ({ id: c.id, by: c.user.handle, text: c.message })), count: m.params.raw.comments.length } : { fetch_here: { key: "K1", token: "figd_t" } });
     if (m.command === "build" && m.params.look) return p.answer(m, { roots: [{ id: "1:9" }], created: 1, look: { base64: "iVBORw0KGgo=", width: 300, height: 200, id: "1:9", name: "Look at me" } });
     held.push(m);
   };
@@ -221,12 +230,19 @@ function fakePlugin() {
   await A.tool("run_code", { code: "return 'SECRET_DESIGN_TEXT'" }).catch(() => null);
   await sleep(200);
   const logText = fs.readFileSync(LOG, "utf8");
-  assert.ok(/ info started 1\.5\.1 /.test(logText) && / call build \d+ms/.test(logText) && / error update_nodes \d+ms.*Cancelled before it ran/.test(logText), logText.slice(-2000));
+  assert.ok(/ info started 1\.6\.0 /.test(logText) && / call build \d+ms/.test(logText) && / error update_nodes \d+ms.*Cancelled before it ran/.test(logText), logText.slice(-2000));
   assert.ok(/ plugin "Jobs file" nodechange: TypeError: boom/.test(logText));
   assert.ok(!/SECRET_DESIGN_TEXT|With progress|Look at me/.test(logText), "no arguments or content in the log");
   const se = JSON.parse(txt(await A.tool("status", { errors: true })));
   assert.ok(se.log === LOG && se.recent_errors.some((l) => /nodechange: TypeError: boom/.test(l)) && se.recent_errors.some((l) => /update_nodes/.test(l)), JSON.stringify(se.recent_errors));
   console.log("bridge log + status errors OK");
+
+  /* 1.6: comments, fetched by the bridge when the plugin window can't reach Figma's API */
+  r = json(await A.tool("get_comments", {}));
+  assert.ok(r.count === 1 && r.threads[0].by === "Lan" && r.etag, JSON.stringify(r));
+  assert.ok(apiSeen.length === 1 && apiSeen[0].url === "/files/K1/comments?as_md=true" && apiSeen[0].token === "figd_t");
+  assert.ok(!fs.readFileSync(LOG, "utf8").includes("figd_t"), "the token never reaches the log");
+  console.log("get_comments fallback OK");
   const plugin2 = p2;
 
   B.close(); A.close(); plugin2.ws.close();

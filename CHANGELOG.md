@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+
+- **Claude can read the file's comments.** New tool `get_comments`: open threads, newest first, with the comment number, author, time, text, the layer each one is pinned to (id, name, page, path) or its point on the canvas, replies and reactions. `node_id` keeps the comments on one layer and what's inside it, `resolved: true` adds resolved threads, and `since` works as on other reads.
+- The Plugin API can't see comments, so they come from Figma's REST API with a personal access token. Paste it once in the Claude Bridge window (**Comments** → token → Save): the plugin checks it, keeps it in its local storage on this computer, and sends it only to api.figma.com. Without a token, Claude is told how to make one (Figma → Settings → Security → Personal access tokens, scope "File comments: Read").
+- Manifest: network access to `https://api.figma.com` (re-run the plugin to load it).
+
 ## 1.5.1
 
 Fewer errors when Claude windows come and go, and a log to find the rest.

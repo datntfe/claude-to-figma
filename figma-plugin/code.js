@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.5.1";
+const VERSION = "1.6.0";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
@@ -2601,6 +2601,7 @@ const handlers = {
     if (n.type === "PAGE" && n.loadAsync) await n.loadAsync();
     return treeCapped(n, p.depth === undefined ? 2 : p.depth, p.max_nodes || 400);
   },
+  async get_comments(p) { return commentsFor(p); },
   async list_pages() {
     return { current: { id: figma.currentPage.id, name: figma.currentPage.name }, pages: figma.root.children.map(function (pg) { return { id: pg.id, name: pg.name }; }) };
   },
@@ -3141,6 +3142,7 @@ function summarize(cmd, r, ok, err) {
     case "screenshot": return "Screenshot" + (r.width ? " " + r.width + "×" + r.height : "");
     case "find_nodes": return "Found " + plural(r.count || 0, "layer");
     case "export_nodes": return "Exported " + plural((r.files || []).length, "file");
+    case "get_comments": return r.fetch_here ? "Asked the bridge to fetch comments" : "Read " + plural(r.count || 0, "comment thread");
     default: return cmd.replace(/_/g, " ");
   }
 }
@@ -3167,7 +3169,7 @@ function touchedIds(cmd, p, r) {
   return ids;
 }
 function preview(v) {
-  try { return clip(JSON.stringify(v, function (k, x) { return k === "base64" ? "(image data)" : x; }), 1500); } catch (e) { return ""; }
+  try { return clip(JSON.stringify(v, function (k, x) { return k === "base64" ? "(image data)" : k === "token" ? "(hidden)" : x; }), 1500); } catch (e) { return ""; }
 }
 async function showNodes(ids) {
   const nodes = [];
@@ -3304,14 +3306,16 @@ function setMode(m, save) {
   figma.ui.postMessage({ type: "info", info: { paused: m === "off", ask: m === "ask" } });
   postPrefs();
 }
-function postPrefs() { try { figma.ui.postMessage({ type: "prefs", mode: mode, follow: follow }); } catch (e) { /* closing */ } }
+function postPrefs() { try { figma.ui.postMessage({ type: "prefs", mode: mode, follow: follow, comments: commentsUser || (figmaToken ? "on" : "") }); } catch (e) { /* closing */ } }
 function modeKey() { return "mode:" + (fileKey() || figma.root.name); }
 let prefsReady = null, prefsDone = false;
 function loadPrefs() {
   const get = function (k) { try { return Promise.resolve(figma.clientStorage.getAsync(k)).catch(function () { return undefined; }); } catch (e) { return Promise.resolve(undefined); } };
-  prefsReady = Promise.all([get(modeKey()), get("follow")]).then(function (v) {
+  prefsReady = Promise.all([get(modeKey()), get("follow"), get("figmaToken"), get("figmaTokenUser")]).then(function (v) {
     prefsDone = true;
     follow = !!v[1];
+    figmaToken = typeof v[2] === "string" ? v[2] : "";
+    commentsUser = figmaToken && typeof v[3] === "string" ? v[3] : "";
     if (v[0] === "ask" || v[0] === "off") setMode(v[0], false); else postPrefs();
   });
   return prefsReady;
@@ -3322,6 +3326,98 @@ function prefsLoaded() {
   let t;
   return Promise.race([prefsReady, new Promise(function (r) { t = setTimeout(r, 1500); })]).then(function () { clearTimeout(t); });
 }
+/* ---------- comments ----------
+   The Plugin API can't read comments, so they come from Figma's REST API with a personal access token
+   the user saves in the Claude Bridge window (kept in this plugin's local storage on this computer,
+   only ever sent to api.figma.com). */
+let figmaToken = "", commentsUser = "";
+const COMMENTS_HELP = "Comments need a Figma access token, once per computer: in Figma open Settings → Security → Personal access tokens → Generate new token, give it the scope \"File comments: Read\" (and \"File content: Read\"), copy it, then paste it into the Claude Bridge window (Comments → Token) and press Save.";
+async function figmaApi(path, token) {
+  const r = await fetch("https://api.figma.com/v1" + path, { headers: { "X-Figma-Token": token } });
+  let body = null;
+  try { body = await r.json(); } catch (e) { body = null; }
+  if (r.status === 403 || r.status === 401) throw new Error("Figma refused the access token (" + r.status + (body && body.err ? ": " + body.err : "") + "). Make a new token with the scope \"File comments: Read\" and save it in the Claude Bridge window (Comments → Token).");
+  if (r.status === 404) throw new Error("Figma's API can't find this file with that token: the token's account needs access to the file.");
+  if (!r.ok) throw new Error("Figma's API answered " + r.status + (body && (body.err || body.message) ? ": " + (body.err || body.message) : "") + ".");
+  return body;
+}
+async function saveToken(token) {
+  token = String(token || "").trim();
+  if (!token) { figmaToken = ""; commentsUser = ""; saveStore("figmaToken", ""); saveStore("figmaTokenUser", ""); postPrefs(); return { ok: true, removed: true }; }
+  const me = await figmaApi("/me", token);
+  figmaToken = token; commentsUser = (me && (me.handle || me.email)) || "on";
+  saveStore("figmaToken", token); saveStore("figmaTokenUser", commentsUser);
+  postPrefs();
+  return { ok: true, user: commentsUser };
+}
+async function commentsFor(p) {
+  let raw = p.raw;
+  const key = fileKey();
+  if (!raw) {
+    await prefsLoaded();
+    if (!key) throw new Error("This file has no key the API can use (a new file that was never saved, or a branch). Save the file in Figma first.");
+    if (!figmaToken) throw new Error(COMMENTS_HELP);
+    try { raw = await figmaApi("/files/" + key + "/comments?as_md=true", figmaToken); }
+    catch (e) {
+      // the request never got an answer (blocked in this window): the bridge on this computer asks instead
+      if (e && /fetch|network|load failed|cors/i.test(String(e.message)) && !/answered|refused|can't find/.test(String(e.message))) return { fetch_here: { key: key, token: figmaToken } };
+      throw e;
+    }
+  }
+  const list = (raw && raw.comments) || [];
+  const byId = {}, threads = [];
+  list.forEach(function (c) { byId[c.id] = c; });
+  const nodeCache = new Map();
+  async function nodeInfo(id) {
+    if (!id) return null;
+    if (!nodeCache.has(id)) {
+      let n = null;
+      try { n = await figma.getNodeByIdAsync(id); } catch (e) { n = null; }
+      nodeCache.set(id, n ? { id: n.id, name: n.name, type: n.type, page: pageOf(n) ? pageOf(n).name : undefined, path: ancestors(n) || undefined, _n: n } : { id: id, deleted: true });
+    }
+    return nodeCache.get(id);
+  }
+  let scope = null;
+  if (p.node_id) scope = await getNode(p.node_id);
+  const inScope = function (info) {
+    if (!scope) return true;
+    if (!info || !info._n) return false;
+    for (let q = info._n; q; q = q.parent) if (q === scope) return true;
+    return false;
+  };
+  const person = function (u) { return u ? (u.handle || u.email || u.id) : "?"; };
+  const one = function (c) {
+    const o = { id: c.id, by: person(c.user), at: c.created_at, text: c.message };
+    if (c.reactions && c.reactions.length) o.reactions = c.reactions.map(function (r) { return r.emoji; }).join("");
+    return o;
+  };
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (c.parent_id) continue;
+    if (c.resolved_at && !p.resolved) continue;
+    const meta = c.client_meta || {};
+    const info = await nodeInfo(meta.node_id);
+    if (!inScope(info)) continue;
+    const t = one(c);
+    if (c.order_id) t.n = Number(c.order_id) || c.order_id;
+    if (c.resolved_at) t.resolved = c.resolved_at;
+    if (info) { const x = Object.assign({}, info); delete x._n; t.layer = x; }
+    else if (typeof meta.x === "number") t.canvas = { x: round(meta.x), y: round(meta.y) };
+    const replies = list.filter(function (r) { return r.parent_id === c.id; }).sort(function (a, b) { return String(a.created_at).localeCompare(String(b.created_at)); }).map(one);
+    if (replies.length) t.replies = replies;
+    t._last = replies.length ? replies[replies.length - 1].at : c.created_at;
+    threads.push(t);
+  }
+  threads.sort(function (a, b) { return String(b._last).localeCompare(String(a._last)); });
+  const limit = p.limit || 50;
+  const out = threads.slice(0, limit).map(function (t) { delete t._last; return t; });
+  const res = { file: figma.root.name, threads: out, count: threads.length };
+  if (threads.length > limit) res.more = threads.length - limit;
+  if (scope) res.scope = scope.name;
+  if (!threads.length) res.note = p.resolved ? "No comments here." : "No open comments here" + (list.some(function (c) { return c.resolved_at; }) ? " (resolved ones are left out: resolved: true shows them)." : ".");
+  return res;
+}
+
 /* the picture that `look: true` sends back: the screens that changed */
 function screenOf(n) { let q = n; while (q.parent && q.parent.type !== "PAGE" && q.parent.type !== "SECTION") q = q.parent; return q; }
 async function lookAt(ids) {
@@ -3425,6 +3521,11 @@ figma.ui.onmessage = function (msg) {
   if (msg.type === "mode") { setMode(msg.mode, true); return; }
   if (msg.type === "allow") { setMode(msg.on === false ? "off" : "allow", true); return; }   // panels before 1.5
   if (msg.type === "follow") { follow = !!msg.on; saveStore("follow", follow); return; }
+  if (msg.type === "set-token") {
+    saveToken(msg.token).then(function (r) { figma.ui.postMessage({ type: "token-saved", ok: true, user: r.user, removed: !!r.removed }); })
+      .catch(function (e) { figma.ui.postMessage({ type: "token-saved", ok: false, error: String(e && e.message ? e.message : e) }); });
+    return;
+  }
   if (msg.type === "decide") { decide(msg.rid, !!msg.ok, msg.ok ? "" : "denied", msg.minutes); return; }
   if (msg.type === "cancel") { cancelCommand(msg.rid, msg.by); return; }
   if (msg.type === "ui-resize") {

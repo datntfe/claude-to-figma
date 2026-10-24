@@ -28,7 +28,7 @@ const pathMod = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.5.1";
+const VERSION = "1.6.0";
 const log = (...a) => { const t = a.join(" "); process.stderr.write("[figma-bridge] " + t + "\n"); fileLog("info", t); };
 
 /* ---------------- the bridge's own log ----------------
@@ -633,6 +633,7 @@ const RUN_CODE_HELP = [
 ].join("\n");
 
 const FILE_PROP = { type: "string", description: "Figma file name or link (needed for changes when several are open)." };
+const FIGMA_API = process.env.FIGMA_BRIDGE_API || "https://api.figma.com/v1";
 const SINCE_PROP = { type: "string", description: "An earlier etag: returns {unchanged: true} if nothing changed." };
 const LOOK_PROP = { type: "boolean", description: "Also return a picture of the result." };
 const VAR_REF = "a variable name like 'color/brand/primary', '{name}', a 'VariableID:…' id, {key: '…'} for a library variable, or null to unbind";
@@ -744,6 +745,26 @@ const TOOLS = [
       additionalProperties: false
     },
     run: async (a) => reply(await callPlugin("get_spec", { node_id: a.node_id, ids: a.ids, depth: a.depth, max_nodes: a.max_nodes, force: a.force, include_hidden: a.include_hidden, dedupe: a.dedupe }, 120000, a.file, false), "get_spec", a)
+  },
+  {
+    name: "get_comments",
+    description: "Comments on the open file, read from Figma's API with the token the user saved in the Claude Bridge window. Open threads, newest first: number, author, time, text, pinned layer (id, name, page) or canvas point, replies. node_id: that layer and inside it; resolved: true adds resolved ones.",
+    inputSchema: {
+      type: "object",
+      properties: { node_id: { type: "string" }, resolved: { type: "boolean" }, limit: { type: "number", description: "Most threads (default 50)." }, since: SINCE_PROP },
+      additionalProperties: false
+    },
+    run: async (a) => {
+      const params = { node_id: a.node_id, resolved: a.resolved, limit: a.limit };
+      let r = await callPlugin("get_comments", params, 60000, a.file, false);
+      const fh = r.result && r.result.fetch_here;
+      if (fh) {   // the plugin window couldn't reach Figma's API: fetch here and let the plugin match the layers
+        const res = await fetch(FIGMA_API + "/files/" + encodeURIComponent(fh.key) + "/comments?as_md=true", { headers: { "X-Figma-Token": fh.token } });
+        if (!res.ok) throw new Error("Figma's API answered " + res.status + " for the comments" + (res.status === 403 || res.status === 401 ? ": the token in the Claude Bridge window was refused; save a new one with the scope \"File comments: Read\"." : "."));
+        r = await callPlugin("get_comments", Object.assign({ raw: await res.json() }, params), 60000, a.file, false);
+      }
+      return reply(r, "get_comments", a);
+    }
   },
   {
     name: "screenshot",
@@ -1112,6 +1133,7 @@ const NARROW = {
   get_variables: "filter with collection, query or type, or page with offset",
   get_library: "use kind and query",
   get_context: "lower depth or max_layers",
+  get_comments: "use node_id or limit",
   run_code: "return only the fields you need",
   audit_design: "use checks, node_id or limit",
   update_nodes: "send fewer items per call",
@@ -1154,7 +1176,7 @@ function fitBudget(value, budget) {
   return { value: v, cut: Array.from(cuts.entries()).map(([k, c]) => k + " shows " + c.kept + " of " + c.total) };
 }
 /* Reads answer with an etag; the same read with since: <etag> only says {unchanged: true} when nothing changed. */
-const ETAG_TOOLS = new Set(["get_selection", "get_spec", "get_tree", "find_nodes", "get_variables", "get_library"]);
+const ETAG_TOOLS = new Set(["get_selection", "get_spec", "get_tree", "find_nodes", "get_variables", "get_library", "get_comments"]);
 function etagOf(v) { return crypto.createHash("sha1").update(JSON.stringify(v === undefined ? null : v)).digest("base64").replace(/[^A-Za-z0-9]/g, "").slice(0, 10); }
 function reply(r, tool, a) {
   const head = (r && r.files > 1 && r.file ? "[Figma file: " + r.file + "]\n" : "") + notesText(r);
@@ -1186,7 +1208,7 @@ const EDIT = { destructiveHint: true, openWorldHint: false };
 const SAFE = { destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const ANNOTATIONS = {
   status: ["Bridge status", READ], get_context: ["What I'm working on", READ], get_selection: ["Selection details", READ], get_spec: ["Design spec for code", READ],
-  screenshot: ["Screenshot", READ], get_tree: ["Layer tree", READ], list_pages: ["Pages", READ], find_nodes: ["Find layers", READ],
+  screenshot: ["Screenshot", READ], get_comments: ["Comments", { readOnlyHint: true, openWorldHint: true }], get_tree: ["Layer tree", READ], list_pages: ["Pages", READ], find_nodes: ["Find layers", READ],
   get_variables: ["Variables", READ], get_library: ["Styles, components and libraries", READ],
   set_page: ["Switch page", SAFE], focus: ["Select and zoom", SAFE], audit_design: ["Check and tidy", SAFE],
   build: ["Build layers", ADD], import_from_library: ["Import from library", ADD],
@@ -1457,7 +1479,7 @@ const INSTRUCTIONS = [
   "Tidy and polish: audit_design (with fix for the safe fixes) and update_nodes for batch changes. Text: find_nodes, then update_nodes.",
   "Variables: get_variables, set_variables, bind_variables. Styles and components: get_library, set_styles, import_from_library. New designs: build with components, '{variable}' values and styles.",
   "Shaders: get_library kind 'shaders' lists them, update_nodes or build with shader applies them as a fill, stroke or effect. The Plugin API can't write new shaders.",
-  "Files on this computer: place_image brings images in, export_nodes writes assets out.",
+  "Files on this computer: place_image brings images in, export_nodes writes assets out. Comments on the file: get_comments.",
   "Library items (variables, styles, components from another file) are read-only in the files that use them: to change them, ask the user to open the library file and run Claude Bridge there, make the change in that file, then the user publishes the library update.",
   "Prefer run_code for anything the other tools don't cover (h.progress in long loops), then check the result with look or screenshot, and audit_design overflow for text that doesn't fit.",
   "When Claude Bridge is open in several files, pass file: \"<name>\" (required for changes)."

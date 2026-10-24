@@ -19,11 +19,12 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, localhost o
 - **Variables, styles and libraries.** Create and edit variables, modes and aliases, bind them to layers, create styles, use and import library components, styles and variables.
 - **Shaders.** List the shaders available to the file and apply them as a fill, stroke or effect, with their properties set by name (colours, numbers, points, gradients, variables).
 - **Tidy and polish, check designs.** `audit_design` finds default names, hard-coded values that match a variable, off-grid spacing, half pixels, low text contrast, text that doesn't fit its box and more, and fixes the safe ones. `update_nodes` changes many layers in one go: text, styles, variants, auto layout, prototype links.
+- **Comments.** Claude reads the file's comment threads (who, when, what, which layer, replies), so "fix what Lan commented on" works.
 - **Your computer too.** Put images from a folder or a link into the design, and export icons and screens straight into a code project.
 - **Several files at once.** Keep the plugin open in a library file and a product file together; Claude works in both.
 - **Quick actions.** Ready-made prompts (Tidy and polish, Check design, Generate a design, Rewrite or translate text, Edit variables, Make a prototype, Hand off to code, Edit a library).
 - **Full Plugin API.** Anything a Figma plugin can do, Claude can do through `run_code`.
-- **Light on Claude's context.** 24 tools in about 7K tokens (tool-by-tool MCP servers often take 25K+), compact results capped at about 20K tokens with a note saying how to get the rest, reads that answer just "unchanged" when nothing changed, a picture of the result in the same answer as a change (`look: true`), and read-only tools marked so you can always allow them.
+- **Light on Claude's context.** 25 tools in about 7K tokens (tool-by-tool MCP servers often take 25K+), compact results capped at about 20K tokens with a note saying how to get the rest, reads that answer just "unchanged" when nothing changed, a picture of the result in the same answer as a change (`look: true`), and read-only tools marked so you can always allow them.
 - **No dependencies, local only.** The server is one Node.js file (Node 18+) that listens on `127.0.0.1` / `::1`; the plugin is plain JavaScript. Several Claude windows (desktop, Cowork, Claude Code) share one connection.
 
 ---
@@ -201,6 +202,7 @@ The plugin window shows:
 | Timeline | One row per call: a plain summary ("Created 14 layers", "Read the design (32 layers)"), duration and time. Changes carry "↶ 1 undo"; reads are dimmed. Click a row to see the request and the result. When several Claude windows work in the file, each row says which one sent it. |
 | Running rows | Say what they wait for ("Waiting for the change before it", "Waiting for your OK") or how far they are ("12 of 40 · Renaming layers", with a progress bar), and how long it's been. **Cancel** drops a change that hasn't started, or stops a running one at its next step. |
 | **Show** | Selects the layers a call touched and zooms to them (at most 400%). The toast Figma shows after each change has the same button. |
+| **Comments** | Paste a Figma personal access token once (Figma → Settings → Security → Personal access tokens, scope "File comments: Read") so Claude can read the file's comments. The button shows ✓ when it's set; **Remove** deletes it. |
 | **Follow** | Scrolls the canvas to what Claude changes, without touching your selection or zooming in. |
 | **Changes only** | Hides the reads in the timeline. |
 | **Save version** | Saves "Before Claude · 14:32" in the file's version history. |
@@ -270,6 +272,7 @@ Claude sees these tools. With some clients they're prefixed with the server name
 | `get_tree` | `node_id`, `depth` (default 2), `max_nodes` (default 400), `since` | Layer tree of a node, or of the current page, level by level; `more` marks where layers were left out. |
 | `find_nodes` | `scope` (page/selection/file) or `node_id`, `type`, `name`, `text`, `component`, `limit`, `offset`, `since` | Search layers by type, name (or `/regex/`), text content or component; flat list with ids, paths, text, fonts and text styles. `next_offset` pages through long lists. |
 | `list_pages` | — | All pages, plus the current one. |
+| `get_comments` | `node_id`, `resolved`, `limit` (default 50), `since` | The file's comment threads, newest first: number, author, time, text, the layer it's pinned to (id, name, page, path) or canvas point, replies, reactions. Needs the token saved in the plugin window (**Comments**). |
 
 These reads (and `get_variables`, `get_library`) answer with an `etag`. Passing it back as `since` returns only `{ "unchanged": true }` when nothing changed, so checking again costs almost nothing.
 
@@ -565,7 +568,8 @@ Logs go to stderr with the `[figma-bridge]` prefix. stdout is reserved for MCP. 
 - Web pages can't use it either: browsers always send an `Origin` header with WebSockets, and the server only accepts the plugin window (origin `null` or `figma.com`) and other copies of itself (no origin). The `Host` header must name this computer (`localhost`, `127.0.0.1`, `[::1]`), which stops DNS-rebinding tricks.
 - An answer counts only from the file the command was sent to, command ids are random, a connection must say who it is within 10 seconds, and messages are capped at 256 MB.
 - Exports always stay inside the folder Claude was given, whatever the layer is called.
-- The plugin's manifest allows network access only to `localhost:3055` (`devAllowedDomains`). It can't reach the internet.
+- The plugin's manifest allows network access only to `localhost:3055` (`devAllowedDomains`) and `api.figma.com` (to read comments).
+- The comments token stays in the plugin's local storage on your computer and is sent only to api.figma.com (or, if the plugin window can't reach it, to the bridge on this computer, which makes the same request). It is never written to the log or shown in the timeline.
 - `run_code` lets Claude run **any** Plugin API code in the open file: read, change or delete layers. Use the bridge on files you're comfortable letting Claude edit, keep version history, and close the plugin when you're done. For files that need care, set the window to **Ask first** (you see each change, and the code, before it runs) or **Look only**.
 - `place_image` reads the image file or link Claude is given, and `export_nodes` writes files into the folder Claude is given. Both run with your user's permissions on your computer, only when Claude calls them.
 - The activity log lives in the plugin's memory and disappears when you close the plugin.

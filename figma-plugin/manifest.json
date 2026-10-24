@@ -4,13 +4,22 @@
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
-  "editorType": ["figma"],
+  "editorType": [
+    "figma"
+  ],
   "documentAccess": "dynamic-page",
-  "permissions": ["teamlibrary"],
+  "permissions": [
+    "teamlibrary"
+  ],
   "enablePrivatePluginApi": true,
   "networkAccess": {
-    "allowedDomains": ["none"],
-    "devAllowedDomains": ["http://localhost:3055", "ws://localhost:3055"],
-    "reasoning": "Connects only to the Claude bridge server running on this computer."
+    "allowedDomains": [
+      "https://api.figma.com"
+    ],
+    "devAllowedDomains": [
+      "http://localhost:3055",
+      "ws://localhost:3055"
+    ],
+    "reasoning": "Connects to the Claude bridge server running on this computer, and to Figma's own API to read the file's comments with the user's token."
   }
 }

@@ -67,6 +67,11 @@
   .foot { padding: 7px 12px 9px; border-top: 1px solid var(--figma-color-border, #e6e6e6); justify-content: space-between; flex-wrap: wrap; row-gap: 6px; color: var(--figma-color-text-tertiary, #999); }
   .foot button, .foot span { white-space: nowrap; }
   .foot input { width: 46px; font: inherit; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc); background: transparent; color: inherit; }
+  #tokbox { display: none; margin-top: 8px; padding: 8px; border-radius: 6px; background: var(--figma-color-bg-secondary, #f5f5f5); }
+  #tokbox.open { display: block; }
+  #tokbox input { flex: 1; min-width: 0; font: inherit; padding: 3px 6px; border-radius: 5px; border: 1px solid var(--figma-color-border, #ccc); background: var(--figma-color-bg, #fff); color: inherit; }
+  .hint { margin-top: 6px; color: var(--figma-color-text-secondary, #666); font-size: 11px; }
+  #tokState { flex: 1; font-size: 11px; color: var(--figma-color-text-secondary, #666); }
   #grip { position: fixed; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize;
           background: linear-gradient(135deg, transparent 50%, var(--figma-color-border-strong, #bbb) 50%, transparent 58%, transparent 68%, var(--figma-color-border-strong, #bbb) 68%, transparent 76%); }
 </style>
@@ -85,7 +90,12 @@
         <label><input type="checkbox" id="onlyChanges"> Changes only</label>
         <label title="Scroll the canvas to what Claude changes (your selection stays as it is)"><input type="checkbox" id="follow"> Follow</label>
       </span>
-      <button id="saveVersion" title="Save a restore point in the file's version history">Save version</button>
+      <span class="row" style="gap:6px"><button id="comments" title="Let Claude read this file's comments">Comments</button><button id="saveVersion" title="Save a restore point in the file's version history">Save version</button></span>
+    </div>
+    <div id="tokbox">
+      <div class="row"><input id="tok" type="password" placeholder="Figma access token (figd_…)" autocomplete="off"><button id="tokSave" class="primary">Save</button></div>
+      <div class="hint">Figma → Settings → Security → Personal access tokens → Generate new token, scope “File comments: Read”. It stays on this computer and is only sent to api.figma.com.</div>
+      <div class="row" style="margin-top:6px"><span id="tokState">Comments: off</span><button id="tokRemove" class="link">Remove</button></div>
     </div>
   </div>
   <div id="asks"></div>
@@ -276,7 +286,8 @@
     if (m.type === "progress") onProgress(m);
     if (m.type === "ask") addAsk(m);
     if (m.type === "asked") removeAsk(m.rid);
-    if (m.type === "prefs") { if (m.mode) modeEl.value = m.mode; followEl.checked = !!m.follow; refreshStatus(); }
+    if (m.type === "prefs") { if (m.mode) modeEl.value = m.mode; followEl.checked = !!m.follow; showComments(m.comments); refreshStatus(); }
+    if (m.type === "token-saved") { document.getElementById("tokSave").disabled = false; if (m.ok) { document.getElementById("tok").value = ""; showComments(m.removed ? "" : m.user); if (!m.removed) tokbox.classList.remove("open"); } else tokState.textContent = m.error; }
     if (m.type === "saved") { statusEl.textContent = m.ok ? "Saved a version: " + m.title : "Couldn't save a version: " + m.error; setTimeout(refreshStatus, 4000); }
     if (!FORWARD[m.type]) return;
     if (m.type === "hello" && m.info) { lastHello = m.info; setStatus("on", connectedText()); }
@@ -298,6 +309,17 @@
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") send({ type: "activity", what: "focus" }); });
   window.addEventListener("focus", function () { send({ type: "activity", what: "focus" }); });
   document.getElementById("reconnect").onclick = function () { quickDrops = 0; connect(); };
+  var tokbox = document.getElementById("tokbox"), tokState = document.getElementById("tokState");
+  function showComments(who) {
+    document.getElementById("comments").textContent = who ? "Comments ✓" : "Comments";
+    tokState.textContent = who ? "Comments: on" + (who !== "on" ? " (" + who + ")" : "") : "Comments: off";
+  }
+  document.getElementById("comments").onclick = function () { tokbox.classList.toggle("open"); };
+  document.getElementById("tokSave").onclick = function () {
+    var v = document.getElementById("tok").value.trim(); if (!v) return;
+    this.disabled = true; tokState.textContent = "Checking the token…"; toMain({ type: "set-token", token: v });
+  };
+  document.getElementById("tokRemove").onclick = function () { toMain({ type: "set-token", token: "" }); };
   modeEl.onchange = function () { toMain({ type: "mode", mode: modeEl.value }); refreshStatus(); };
   followEl.onchange = function () { toMain({ type: "follow", on: followEl.checked }); };
   onlyEl.onchange = filter;

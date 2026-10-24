@@ -19,11 +19,12 @@ Claude ──(MCP, stdio)──► server/index.js ──(WebSocket, chỉ trong
 - **Variables, styles và library.** Tạo, sửa variable, mode, alias, gắn variable vào layer, tạo style, dùng và import component, style, variable từ library.
 - **Shader.** Xem các shader file đang dùng được và áp chúng làm fill, stroke hoặc effect, chỉnh property theo tên (màu, số, điểm, gradient, variable).
 - **Dọn dẹp và soát thiết kế.** `audit_design` tìm tên layer mặc định, giá trị hard-code trùng variable, spacing lệch grid, lệch pixel, chữ thiếu tương phản, chữ tràn khung…, và tự sửa phần an toàn. `update_nodes` sửa hàng loạt layer một lần: text, style, variant, auto layout, link prototype.
+- **Comment.** Claude đọc được các luồng comment của file (ai, khi nào, nội dung, ghim vào layer nào, trả lời), nên chỉ cần nói "sửa theo comment của Lan".
 - **Làm cả với file trên máy.** Đưa ảnh từ thư mục hoặc link vào thiết kế, export icon và màn hình thẳng vào thư mục code.
 - **Nhiều file cùng lúc.** Mở plugin ở cả file library và file sản phẩm, Claude làm được ở cả hai.
 - **Thao tác nhanh.** Có sẵn các prompt: Tidy and polish, Check design, Generate a design, Viết lại/dịch text, Sửa variables, Làm prototype, Bàn giao code, Sửa library.
 - **Dùng được toàn bộ Plugin API.** Plugin Figma làm được gì thì Claude làm được nấy qua `run_code`.
-- **Nhẹ cho Claude.** 24 tool chỉ tốn khoảng 7K token (các MCP server kiểu mỗi lệnh một tool thường 25K+), kết quả gọn và giới hạn khoảng 20K token kèm ghi chú cách lấy phần còn lại, đọc lại mà chưa có gì đổi thì chỉ trả về "unchanged", lệnh sửa trả kèm ảnh kết quả (`look: true`), tool chỉ đọc được đánh dấu để bạn cho phép luôn.
+- **Nhẹ cho Claude.** 25 tool chỉ tốn khoảng 7K token (các MCP server kiểu mỗi lệnh một tool thường 25K+), kết quả gọn và giới hạn khoảng 20K token kèm ghi chú cách lấy phần còn lại, đọc lại mà chưa có gì đổi thì chỉ trả về "unchanged", lệnh sửa trả kèm ảnh kết quả (`look: true`), tool chỉ đọc được đánh dấu để bạn cho phép luôn.
 - **Không cần cài thư viện, chỉ chạy trong máy.** Server là một file Node.js (Node 18+) chỉ nghe trên `127.0.0.1` / `::1`; plugin là JavaScript thuần. Nhiều cửa sổ Claude (desktop, Cowork, Claude Code) dùng chung một kết nối.
 
 ---
@@ -201,6 +202,7 @@ Cửa sổ plugin hiển thị:
 | Dòng thời gian | Mỗi lệnh một dòng: tóm tắt ("Created 14 layers", "Read the design (32 layers)"), thời gian chạy và giờ. Lệnh sửa có nhãn "↶ 1 undo"; lệnh chỉ đọc hiện mờ. Bấm vào dòng để xem yêu cầu và kết quả. Khi nhiều cửa sổ Claude cùng làm trên file, mỗi dòng ghi rõ cửa sổ nào gửi. |
 | Dòng đang chạy | Ghi đang chờ gì ("Waiting for the change before it", "Waiting for your OK") hoặc đã tới đâu ("12 of 40 · Renaming layers", kèm thanh tiến độ), và đã chạy bao lâu. **Cancel** huỷ thay đổi chưa bắt đầu, hoặc dừng thay đổi đang chạy ở bước kế tiếp. |
 | **Show** | Chọn các layer mà lệnh đó đụng tới và zoom tới (tối đa 400%). Thông báo Figma hiện sau mỗi lần sửa cũng có nút này. |
+| **Comments** | Dán một lần Figma personal access token (Figma → Settings → Security → Personal access tokens, scope "File comments: Read") để Claude đọc được comment của file. Nút hiện ✓ khi đã có; **Remove** để xoá. |
 | **Follow** | Cuộn canvas tới chỗ Claude vừa sửa, không đổi vùng chọn của bạn và không zoom vào. |
 | **Changes only** | Ẩn các lệnh chỉ đọc khỏi dòng thời gian. |
 | **Save version** | Lưu "Before Claude · 14:32" vào lịch sử phiên bản của file. |
@@ -270,6 +272,7 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 | `get_tree` | `node_id`, `depth` (mặc định 2), `max_nodes` (mặc định 400), `since` | Cây layer của một node, hoặc của page hiện tại, theo từng tầng; `more` đánh dấu chỗ bị lược bớt. |
 | `find_nodes` | `scope` (page/selection/file) hoặc `node_id`, `type`, `name`, `text`, `component`, `limit`, `offset`, `since` | Tìm layer theo loại, tên (hoặc `/regex/`), nội dung text hay component; trả về danh sách phẳng kèm id, đường dẫn, text, font, text style. `next_offset` để lật trang danh sách dài. |
 | `list_pages` | — | Danh sách page và page hiện tại. |
+| `get_comments` | `node_id`, `resolved`, `limit` (mặc định 50), `since` | Các luồng comment của file, mới nhất trước: số thứ tự, người viết, thời gian, nội dung, layer được ghim (id, tên, page, đường dẫn) hoặc điểm trên canvas, trả lời, reaction. Cần token đã lưu trong cửa sổ plugin (**Comments**). |
 
 Các lệnh đọc này (và `get_variables`, `get_library`) trả kèm `etag`. Gửi lại nó trong `since` thì nếu chưa có gì đổi chỉ nhận về `{ "unchanged": true }`, kiểm tra lại gần như không tốn gì.
 
@@ -565,7 +568,8 @@ Log ghi ra stderr với tiền tố `[figma-bridge]`. stdout dành riêng cho MC
 - Trang web cũng không dùng được: trình duyệt luôn gửi header `Origin` khi mở WebSocket, còn server chỉ nhận cửa sổ plugin (origin `null` hoặc `figma.com`) và các bản server khác (không có origin). Header `Host` phải là tên của chính máy này (`localhost`, `127.0.0.1`, `[::1]`), chặn kiểu tấn công DNS rebinding.
 - Chỉ nhận câu trả lời từ đúng file đã nhận lệnh, id lệnh ngẫu nhiên, kết nối phải tự giới thiệu trong 10 giây, và mỗi tin nhắn tối đa 256 MB.
 - File export luôn nằm trong thư mục Claude được giao, dù layer tên là gì.
-- Manifest của plugin chỉ cho phép kết nối tới `localhost:3055` (`devAllowedDomains`). Plugin không ra được internet.
+- Manifest của plugin chỉ cho phép kết nối tới `localhost:3055` (`devAllowedDomains`) và `api.figma.com` (để đọc comment).
+- Token đọc comment nằm trong bộ nhớ cục bộ của plugin trên máy bạn và chỉ gửi tới api.figma.com (hoặc, nếu cửa sổ plugin không gọi được, tới bridge trên chính máy này để gọi thay). Không bao giờ ghi vào log hay hiện trên dòng thời gian.
 - `run_code` cho Claude chạy **bất kỳ** code Plugin API nào trong file đang mở: đọc, sửa hay xoá layer. Chỉ dùng bridge trên file bạn yên tâm cho Claude sửa, giữ version history, và đóng plugin khi xong việc. Với file cần cẩn thận, để cửa sổ ở **Ask first** (bạn thấy từng thay đổi, cả đoạn code, trước khi chạy) hoặc **Look only**.
 - `place_image` đọc file ảnh hoặc link được giao, `export_nodes` ghi file vào thư mục được giao. Cả hai chạy với quyền của user trên máy bạn, và chỉ khi Claude gọi.
 - Nhật ký thao tác chỉ nằm trong bộ nhớ của plugin và mất khi đóng plugin.

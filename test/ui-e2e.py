@@ -83,6 +83,7 @@ window.addEventListener('message', function (ev) {
         summary: m.command === 'run_code' ? 'Ran code' : 'Read', touched: m.command === 'run_code' ? ['12:34'] : [], preview: JSON.stringify(result) } }, '*');
     }, 10);
   }
+  if (m.type === 'set-token') { (window.__panel = window.__panel || []).push({ type: 'set-token', len: m.token.length }); setTimeout(function () { post({ type: 'token-saved', ok: true, user: 'Dat' }); }, 30); return; }
   if (m.type === 'ui-focus' || m.type === 'mode' || m.type === 'follow' || m.type === 'ui-save-version') (window.__panel = window.__panel || []).push(m);
 });
 """
@@ -149,6 +150,16 @@ try:
         ok &= "Stopped part way" in out.get("long", "")
         ok &= any(m.get("type") == "cancel" for m in pg.evaluate("window.__panel"))
         pg.select_option("#mode", "allow")
+
+        # Comments: the token is pasted once in the panel
+        pg.click("#comments")
+        pg.fill("#tok", "figd_example")
+        pg.click("#tokSave")
+        pg.wait_for_function("document.getElementById('comments').textContent.includes('✓')", timeout=3000)
+        tok = pg.inner_text("#tokState")
+        print("comments:", tok)
+        ok &= "Comments: on (Dat)" in tok and pg.input_value("#tok") == ""
+        ok &= any(m.get("type") == "set-token" and m.get("len") == 12 for m in pg.evaluate("window.__panel"))
 
         # A second Figma file opens the plugin too: both stay connected.
         pg2 = b.new_page()

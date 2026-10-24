@@ -348,7 +348,7 @@ for (const c of [libButtonM, libButtonL]) { c._props = { "Label#1:0": { type: "T
 
 const code = fs.readFileSync(path.join(__dirname, "..", "figma-plugin", "code.js"), "utf8");
 const intervals = [];
-const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout, clearTimeout };
+const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout, clearTimeout, fetch: (...a) => figma._fetch(...a) };
 sandbox.globalThis = sandbox;
 vm.runInNewContext(code, sandbox);
 let mid = 0;
@@ -364,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.5.1"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.0"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.5.1"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.0"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -1092,10 +1092,70 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     toUI.length = 0;
     emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("boom in handler"); } } }]);
     const pb = toUI.find((m) => m.type === "problem");
-    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.5.1", JSON.stringify(pb));
+    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.0", JSON.stringify(pb));
     for (let i = 0; i < 8; i++) emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("again"); } } }]);
     assert.ok(toUI.filter((m) => m.type === "problem").length <= 5, "at most 5 a minute");
     console.log("problems reported OK");
+
+    // 1.6: comments, read from Figma's API with the token saved in the panel
+    const pinned = figma.createFrame(); pinned.name = "Checkout"; const btn = figma.createRectangle(); btn.name = "Pay button"; pinned.appendChild(btn);
+    const other = figma.createFrame(); other.name = "Home";
+    const calls = [];
+    const COMMENTS = { comments: [
+      { id: "c1", parent_id: "", order_id: "3", user: { handle: "Lan" }, created_at: "2026-10-20T08:00:00Z", resolved_at: null, message: "Nút này nhỏ quá", client_meta: { node_id: btn.id, node_offset: { x: 4, y: 4 } }, reactions: [{ emoji: "👍" }] },
+      { id: "c2", parent_id: "c1", user: { handle: "Dat" }, created_at: "2026-10-21T09:00:00Z", message: "Ok, tăng lên 48" },
+      { id: "c3", parent_id: "", order_id: "4", user: { handle: "Khoa" }, created_at: "2026-10-22T10:00:00Z", resolved_at: null, message: "Home cần banner", client_meta: { node_id: other.id } },
+      { id: "c4", parent_id: "", order_id: "1", user: { handle: "Lan" }, created_at: "2026-10-01T10:00:00Z", resolved_at: "2026-10-02T10:00:00Z", message: "Đã sửa", client_meta: { node_id: btn.id } },
+      { id: "c5", parent_id: "", order_id: "2", user: { handle: "Mai" }, created_at: "2026-10-19T10:00:00Z", resolved_at: null, message: "Chỗ trống này?", client_meta: { x: 120.4, y: 80 } },
+      { id: "c6", parent_id: "", order_id: "5", user: { handle: "Mai" }, created_at: "2026-10-18T10:00:00Z", resolved_at: null, message: "Layer cũ", client_meta: { node_id: "999:999" } }
+    ] };
+    figma._fetch = async (url, opts) => {
+      calls.push({ url, token: opts.headers["X-Figma-Token"] });
+      const tok = opts.headers["X-Figma-Token"];
+      if (figma._fetchThrows) throw new TypeError("Failed to fetch");
+      const resp = (status, body) => ({ ok: status < 300, status, json: async () => body });
+      if (tok !== "figd_good") return resp(403, { status: 403, err: "Invalid token" });
+      if (/\/me$/.test(url)) return resp(200, { handle: "Dat", email: "d@x" });
+      if (/\/files\/KEY123\/comments\?as_md=true$/.test(url)) return resp(200, COMMENTS);
+      return resp(404, {});
+    };
+    r = await cmd("get_comments", {});
+    assert.ok(!r.ok && /never saved|no key/.test(r.error), r.error);
+    figma.fileKey = "KEY123";
+    r = await cmd("get_comments", {});
+    assert.ok(!r.ok && /Personal access tokens/.test(r.error) && calls.length === 0, "without a token Claude is told how to get one");
+    toUI.length = 0;
+    await uiHandler({ type: "set-token", token: "figd_bad" });
+    await new Promise((res) => setTimeout(res, 10));
+    assert.ok(toUI.find((m) => m.type === "token-saved" && !m.ok && /refused/.test(m.error)) && !figma._store.figmaToken, "a bad token is checked and not kept");
+    toUI.length = 0;
+    await uiHandler({ type: "set-token", token: " figd_good " });
+    await new Promise((res) => setTimeout(res, 10));
+    assert.ok(toUI.find((m) => m.type === "token-saved" && m.ok && m.user === "Dat") && figma._store.figmaToken === "figd_good");
+    assert.ok(toUI.find((m) => m.type === "prefs" && m.comments === "Dat") && !toUI.some((m) => m.type === "prefs" && JSON.stringify(m).includes("figd_")), "the panel learns who, never the token");
+    const cm = ok(await cmd("get_comments", {}));
+    assert.deepEqual(cm.threads.map((t) => t.id), ["c3", "c1", "c5", "c6"], "open threads, newest activity first: " + cm.threads.map((t) => t.id));
+    const th1 = cm.threads[1];
+    assert.ok(th1.n === 3 && th1.by === "Lan" && th1.text === "Nút này nhỏ quá" && th1.layer.name === "Pay button" && th1.layer.path === "Checkout" && th1.layer.page === "Page 1" && th1.reactions === "👍" && th1.replies[0].by === "Dat", JSON.stringify(th1));
+    assert.deepEqual(cm.threads[2].canvas, { x: 120.4, y: 80 }); assert.ok(cm.threads[3].layer.deleted);
+    assert.ok(!cm.threads.some((t) => t.id === "c4") && cm.count === 4);
+    const scoped = ok(await cmd("get_comments", { node_id: pinned.id, resolved: true }));
+    assert.deepEqual(scoped.threads.map((t) => t.id), ["c1", "c4"]); assert.equal(scoped.scope, "Checkout"); assert.ok(scoped.threads[1].resolved);
+    // the plugin window can't reach the API: the bridge fetches and hands the plugin the raw answer
+    figma._fetchThrows = true;
+    toUI.length = 0;
+    const fh = ok(await cmd("get_comments", {}));
+    assert.deepEqual(fh.fetch_here, { key: "KEY123", token: "figd_good" });
+    assert.ok(!toUI.find((m) => m.type === "done").preview.includes("figd_good"), "the timeline never shows the token");
+    figma._fetchThrows = false;
+    const viaRaw = ok(await cmd("get_comments", { raw: COMMENTS, limit: 2 }));
+    assert.ok(viaRaw.threads.length === 2 && viaRaw.more === 2);
+    await uiHandler({ type: "set-token", token: "" });
+    await new Promise((res) => setTimeout(res, 10));
+    assert.equal(figma._store.figmaToken, "");
+    delete figma.fileKey;
+    ok(await cmd("delete_nodes", { ids: [pinned.id, other.id] }));
+    console.log("comments (token check, threads, layers, scope, resolved, fallback) OK");
   }
 
   /* 1.4: new work lands beside the user's work, overlapping nothing */
@@ -1217,7 +1277,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.5.1");
+  assert.equal(sandbox.__claudeBridge.version, "1.6.0");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });
