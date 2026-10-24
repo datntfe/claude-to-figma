@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
@@ -1944,6 +1944,17 @@ async function buildNode(spec, parent, created, env) {
   return n;
 }
 
+/* ---------- problems outside commands go to the bridge's log (at most 5 a minute) ---------- */
+let problemCount = 0, problemWindow = 0;
+function reportProblem(where, e) {
+  const now = Date.now();
+  if (now - problemWindow > 60000) { problemWindow = now; problemCount = 0; }
+  if (problemCount++ >= 5) return;
+  try { figma.ui.postMessage({ type: "problem", where: where, message: clip(String(e && e.stack ? e.stack : e && e.message ? e.message : e), 600), version: VERSION }); } catch (x) { /* closing */ }
+}
+function safely(where, fn) { return function () { try { return fn.apply(this, arguments); } catch (e) { reportProblem(where, e); } }; }
+const onNodeChangeSafe = safely("nodechange", function (ev) { return onNodeChange(ev); });
+
 /* ---------- what the user is doing (activity log) ---------- */
 const ACT = [];
 const ACT_MAX = 300;
@@ -2035,9 +2046,9 @@ function onStyleChange(ev) {
 }
 function watchPage() {
   if (watchedPage === figma.currentPage) return;
-  if (watchedPage) { const old = watchedPage; safe(function () { old.off("nodechange", onNodeChange); }); }
+  if (watchedPage) { const old = watchedPage; safe(function () { old.off("nodechange", onNodeChangeSafe); }); }
   watchedPage = figma.currentPage;
-  safe(function () { watchedPage.on("nodechange", onNodeChange); });
+  safe(function () { watchedPage.on("nodechange", onNodeChangeSafe); });
 }
 function vpSnap() {
   const c = figma.viewport.center, b = figma.viewport.bounds;
@@ -3442,11 +3453,11 @@ figma.ui.onmessage = function (msg) {
   return runCommand(msg, false);
 };
 
-figma.on("selectionchange", onSelectionChange);
-figma.on("currentpagechange", onPageChange);
-safe(function () { figma.on("stylechange", onStyleChange); });
+figma.on("selectionchange", safely("selectionchange", onSelectionChange));
+figma.on("currentpagechange", safely("currentpagechange", onPageChange));
+safe(function () { figma.on("stylechange", safely("stylechange", onStyleChange)); });
 watchPage();
 loadPrefs();
 safe(cleanupTemp);
-setInterval(pollViewport, 1500);
+setInterval(safely("viewport", pollViewport), 1500);
 globalThis.__claudeBridge = { version: VERSION, handlers: handlers, activity: ACT, describe: H.describe };

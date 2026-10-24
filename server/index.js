@@ -28,8 +28,38 @@ const pathMod = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.5.0";
-const log = (...a) => process.stderr.write("[figma-bridge] " + a.join(" ") + "\n");
+const VERSION = "1.5.1";
+const log = (...a) => { const t = a.join(" "); process.stderr.write("[figma-bridge] " + t + "\n"); fileLog("info", t); };
+
+/* ---------------- the bridge's own log ----------------
+   Tool calls (tool, time taken, ok or the error), connections, problems the plugin reports and
+   crashes go to logs/bridge.log next to the server (FIGMA_BRIDGE_LOG sets another file, "off" turns
+   it off). Every copy (hub and relays) writes to the same file. Arguments and results are never
+   written, only their size, so the content of your designs stays out of it. */
+const LOG_FILE = process.env.FIGMA_BRIDGE_LOG === "off" ? null : (process.env.FIGMA_BRIDGE_LOG || pathMod.join(__dirname, "..", "logs", "bridge.log"));
+const LOG_MAX = 2 * 1024 * 1024;
+let logDirMade = false, logBroken = false;
+function fileLog(level, text) {
+  if (!LOG_FILE || logBroken) return;
+  try {
+    if (!logDirMade) { fs.mkdirSync(pathMod.dirname(LOG_FILE), { recursive: true }); logDirMade = true; }
+    try { if (fs.statSync(LOG_FILE).size > LOG_MAX) fs.renameSync(LOG_FILE, LOG_FILE + ".1"); } catch (e) { /* no file yet */ }
+    let who = "?";
+    try { who = role; } catch (e) { /* before the role is set */ }
+    fs.appendFileSync(LOG_FILE, new Date().toISOString() + " " + process.pid + " " + who + " " + level + " " + String(text).replace(/\s+/g, " ").slice(0, 1500) + "\n");
+  } catch (e) { logBroken = true; }
+}
+/* the last errors in the log, for status {errors: true} */
+function recentErrors(n) {
+  if (!LOG_FILE) return [];
+  try {
+    const fd = fs.openSync(LOG_FILE, "r"), size = fs.fstatSync(fd).size, len = Math.min(size, 512 * 1024), buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len); fs.closeSync(fd);
+    const since = Date.now() - 24 * 3600 * 1000;
+    return buf.toString("utf8").split("\n").filter((l) => / (error|plugin|crash) /.test(l) && Date.parse(l.slice(0, 24)) > since).slice(-n)
+      .map((l) => { const m = /^(\S+) (\d+) (\S+) (\S+) (.*)$/.exec(l); return m ? m[1].slice(5, 19).replace("T", " ") + " " + m[5] : l; });
+  } catch (e) { return []; }
+}
 
 /* ---------------- WebSocket framing (RFC 6455, minimal) ---------------- */
 const MAX_MESSAGE = 256 * 1024 * 1024;                                   // a 50 MB export is fine; a runaway sender is not
@@ -124,6 +154,8 @@ let role = "starting";      // "hub" | "relay" | "starting" | "blocked"
 let blockedReason = "";
 const plugins = new Map();  // hub: id -> { id, conn, info, connectedAt, lastActive } (one per open Figma file)
 let pluginSeq = 0;
+let lastPluginAt = 0, hubSince = 0;
+const closedFiles = new Map();   // file name -> when its plugin window closed (for clearer errors)   // hub: when a plugin was last connected, when this copy became the hub
 let hubLink = null;         // relay: connection to the hub
 let hubVersion = null;      // relay: version of the hub we relay through
 const pending = new Map();  // id -> {resolve, reject, plugin?, command?, write?}
@@ -146,8 +178,10 @@ function setClient(info) { BY = (/code/i.test(String(info && info.name || "")) ?
 function newId() { return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex"); }
 function clipStr(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
 
-function failAll(reason) { for (const [id, p] of pending) { pending.delete(id); clearTimeout(p.grace); p.reject(new Error(reason + (p.write ? MAYBE_APPLIED : ""))); } }
-function failFor(plugin, reason) { for (const [id, p] of pending) if (p.plugin === plugin) { pending.delete(id); clearTimeout(p.grace); p.reject(new Error(reason + (p.write ? MAYBE_APPLIED : ""))); } }
+/* errors from a dropped connection: a read may simply be tried again once the line is back */
+function lineError(text) { const e = new Error(text); e.line = true; return e; }
+function failAll(reason) { for (const [id, p] of pending) { pending.delete(id); clearTimeout(p.grace); p.reject(lineError(reason + (p.write ? MAYBE_APPLIED : ""))); } }
+function failFor(plugin, reason) { for (const [id, p] of pending) if (p.plugin === plugin) { pending.delete(id); clearTimeout(p.grace); p.reject(lineError(reason + (p.write ? MAYBE_APPLIED : ""))); } }
 function noteFor(key, text) { const l = lateNotes.get(key) || []; l.push(text); lateNotes.set(key, l.slice(-5)); }
 function takeNotes(key) { const l = lateNotes.get(key); if (!l) return undefined; lateNotes.delete(key); return l; }
 
@@ -185,7 +219,11 @@ function pickPlugin(target, write) {
     let m = list.filter((p) => p.id === t || (p.info.session && p.info.session === t) || (p.info.fileKey && (p.info.fileKey === t || p.info.fileKey === key)));
     if (!m.length) m = list.filter((p) => lower(p.info.file) === tl);
     if (!m.length) m = list.filter((p) => lower(p.info.file).includes(tl));
-    if (!m.length) throw new Error(`No open Figma file matches "${t}". Claude Bridge is open in: ${namesOf(list)}.` + (key ? " (A Figma link only matches when the plugin can read the file key; use the file name instead.)" : ""));
+    if (!m.length) {
+      let closed = "";
+      for (const [name, at] of closedFiles) if (Date.now() - at < 30 * 60000 && (lower(name) === tl || lower(name).includes(tl))) closed = ` Claude Bridge in "${name}" closed ${ago(Date.now() - at)} ago: ask the user to run it again in that file (Plugins → Development → Claude Bridge).`;
+      throw new Error(`No open Figma file matches "${t}". Claude Bridge is open in: ${namesOf(list)}.` + closed + (key ? " (A Figma link only matches when the plugin can read the file key; use the file name instead.)" : ""));
+    }
     if (distinctFiles(m) > 1) throw new Error(`"${t}" matches several open files (${namesOf(m)}). Use the full file name, or one of these ids: ${m.map((p) => p.id + " = " + fileLabel(p)).join(", ")}.`);
     return m[0];
   }
@@ -241,6 +279,25 @@ function hubCallPlugin(command, params, timeout, target, write, opts) {
     p.conn.send(msg);
   });
 }
+/* When a plugin was connected a moment ago (another Claude window closed and the plugin is finding
+   the new hub, Figma reloaded the plugin, the Mac woke up), a call waits a few seconds for it to come
+   back instead of failing straight away. */
+const PLUGIN_WAIT_MS = Math.max(0, parseInt(process.env.FIGMA_BRIDGE_PLUGIN_WAIT_MS || "8000", 10) || 0);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function waitable(e) { return /not connected|No open Figma file matches|is reconnecting/.test(e.message); }
+async function pluginBack(target, write) {
+  try { pickPlugin(target, write); return; } catch (e) { if (!waitable(e)) return; }
+  if (Date.now() - Math.max(lastPluginAt, hubSince) > 120000 && !recentDrops.size) return;   // Figma isn't open: say so at once
+  const until = Date.now() + PLUGIN_WAIT_MS;
+  while (Date.now() < until) {
+    await sleep(200);
+    try { pickPlugin(target, write); return; } catch (e) { if (!waitable(e)) return; }
+  }
+}
+async function hubCall(command, params, timeout, target, write, opts) {
+  await pluginBack(target, write);
+  return hubCallPlugin(command, params, timeout, target, write, opts);
+}
 /* Ask the plugin to drop a change that hasn't started (queued, or waiting for the user's OK) or to stop a running one at its next step. */
 function cancelHubCommand(id, by) {
   const pd = pending.get(id);
@@ -255,7 +312,7 @@ function acceptPlugin(socket, head) {
       if (msg.type === "hello") {
         entry.info = Object.assign({}, msg.info || {});
         entry.ready = true;
-        entry.lastActive = Date.now();
+        entry.lastActive = lastPluginAt = Date.now();
         recentDrops.delete(identity(entry));
         for (const p of plugins.values()) {   // the same plugin run reconnecting: its calls carry on over the new socket
           if (p !== entry && entry.info.session && p.info.session === entry.info.session) {
@@ -272,6 +329,7 @@ function acceptPlugin(socket, head) {
       }
       if (msg.type === "info") { Object.assign(entry.info, msg.info || {}); return; }
       if (msg.type === "activity") { entry.lastActive = Date.now(); return; }
+      if (msg.type === "problem") { fileLog("plugin", '"' + fileLabel(entry) + '" ' + clipStr(msg.where || "?", 40) + ": " + clipStr(msg.message || "", 600)); return; }
       if (msg.type === "progress") {   // queued / asking / running 12 of 40 (by rid: a 1.4 hub ignores messages without id)
         const pd = pending.get(msg.rid);
         if (pd && pd.plugin === entry && pd.onProgress) pd.onProgress(msg);
@@ -295,7 +353,8 @@ function acceptPlugin(socket, head) {
     onClose: () => {
       if (plugins.get(entry.id) !== entry) return;
       plugins.delete(entry.id);
-      log('plugin disconnected from "' + fileLabel(entry) + '"');
+      if (entry.ready) { lastPluginAt = Date.now(); closedFiles.set(fileLabel(entry), Date.now()); }
+      log('plugin disconnected from "' + fileLabel(entry) + '"' + (entry.conn.closedCleanly ? "" : " (dropped)"));
       const why = 'The Figma plugin in "' + fileLabel(entry) + '" disconnected.';
       if (entry.conn.closedCleanly || !entry.ready || !entry.info.session) { failFor(entry, why); return; }
       /* a dropped socket usually comes back within seconds: its calls wait for it a little */
@@ -303,7 +362,7 @@ function acceptPlugin(socket, head) {
       for (const [id, x] of pending) {
         if (x.plugin !== entry) continue;
         x.orphanOf = entry.info.session;
-        x.grace = setTimeout(() => { if (pending.get(id) === x && x.orphanOf) { pending.delete(id); x.reject(new Error(why + (x.write ? MAYBE_APPLIED : ""))); } }, 15000);
+        x.grace = setTimeout(() => { if (pending.get(id) === x && x.orphanOf) { pending.delete(id); x.reject(lineError(why + (x.write ? MAYBE_APPLIED : ""))); } }, 15000);
       }
     }
   });
@@ -348,7 +407,7 @@ function onUpgrade(req, socket, head) {
         try {
           // relays from 1.1 don't say whether a call changes the file: judge by the command
           const write = m.write !== undefined ? !!m.write : (WRITE_COMMANDS.has(m.command) || (m.command === "set_page" && !!(m.params && m.params.create)));
-          const r = await hubCallPlugin(m.command, m.params, m.timeout || 60000, m.target, write, {
+          const r = await hubCall(m.command, m.params, m.timeout || 60000, m.target, write, {
             by: m.by,
             onSent: (id) => sentFor.set(m.id, id),
             onProgress: (pm) => relay.send({ type: "progress", id: m.id, state: pm.state, done: pm.done, total: pm.total, text: pm.text })
@@ -384,6 +443,7 @@ function tryBecomeHub() {
       hubServers.push(srv);
       role = "hub";
       hubVersion = VERSION;
+      hubSince = Date.now();
       log("hub listening on ws://127.0.0.1:" + PORT);
       const v6 = makeHttpServer();
       v6.on("error", () => { /* IPv6 unavailable or taken: 127.0.0.1 is enough */ });
@@ -466,15 +526,33 @@ ensureRole();
 
 /* Returns { result, file, files }: the plugin's answer, which file answered,
    and how many different files have the plugin open (undefined from an old hub). */
+async function ready() {   // hub or relay, waiting out a takeover in progress
+  const until = Date.now() + 6000;
+  for (;;) {
+    await ensureRole();
+    if (role === "hub" || (role === "relay" && hubLink) || role === "blocked" || Date.now() > until) return;
+    await sleep(300);
+  }
+}
 async function callPlugin(command, params, timeoutMs, target, write) {
+  try { return await callPluginOnce(command, params, timeoutMs, target, write); }
+  catch (e) {
+    // a read lost to a dropped line (hub closed, plugin reconnecting) is simply tried again once
+    if (write || !(e.line || /^Lost the connection to the bridge hub|disconnected\.$|^The Figma plugin is not connected/.test(e.message))) throw e;
+    fileLog("info", command + ": " + clipStr(e.message, 120) + " - trying again");
+    await sleep(500);
+    return callPluginOnce(command, params, timeoutMs, target, write);
+  }
+}
+async function callPluginOnce(command, params, timeoutMs, target, write) {
   const timeout = timeoutMs || 60000;
-  await ensureRole();
+  await ready();
   /* the tool call this belongs to (see callTool): it can cancel what it sent and shows progress */
   const cx = callCtx.getStore();
   const opts = { by: BY };
   if (cx) opts.onProgress = (pm) => { cx.progress = { state: pm.state, done: pm.done, total: pm.total, text: pm.text }; };
   try {
-    if (role === "hub") return await hubCallPlugin(command, params, timeout, target, write, Object.assign({ onSent: cx ? (id) => cx.sent.push({ hub: id }) : null }, opts));
+    if (role === "hub") return await hubCall(command, params, timeout, target, write, Object.assign({ onSent: cx ? (id) => cx.sent.push({ hub: id }) : null }, opts));
     if (role === "relay") {
       if (target && hubVersion && older(hubVersion, "1.2.0")) {
         // a 1.1 hub ignores `file` and talks to one file only: make sure it's the one asked for
@@ -491,7 +569,7 @@ async function callPlugin(command, params, timeoutMs, target, write) {
   throw new Error("The bridge is not ready: " + (blockedReason || "starting up, try again in a moment") + ".");
 }
 async function pluginStatus() {
-  await ensureRole();
+  await ready();
   if (role === "hub") return hubStatus();
   if (role === "relay") return (await relayCall("status", null, null, 5000)).result;
   return { connected: false, error: blockedReason || "starting" };
@@ -562,11 +640,12 @@ const VAR_REF = "a variable name like 'color/brand/primary', '{name}', a 'Variab
 const TOOLS = [
   {
     name: "status", direct: true,
-    description: "Check whether the Figma plugin is connected, which file and page are open, and (when several files have Claude Bridge open) which ones.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: "Check whether the Figma plugin is connected, which file and page are open, and (when several files have Claude Bridge open) which ones. errors: true adds the bridge's recent errors from its log.",
+    inputSchema: { type: "object", properties: { errors: { type: "boolean" } }, additionalProperties: false },
     run: async (a) => {
       const st = await pluginStatus();
-      if (!st || !st.connected) return text(st && st.error ? "The bridge is not ready: " + st.error + "." : PLUGIN_HINT);
+      const errs = a.errors ? "\n" + JSON.stringify({ log: LOG_FILE, recent_errors: recentErrors(20) }) : "";
+      if (!st || !st.connected) return text((st && st.error ? "The bridge is not ready: " + st.error + "." : PLUGIN_HINT) + errs);
       let info = Object.assign({}, st.info || {}), lateList = null;
       try { const r = await callPlugin("ping", {}, 8000, a.file, false); info = Object.assign(info, r.result); lateList = r.notes; } catch (e) { /* keep hello info */ }
       const hubV = role === "hub" ? VERSION : (st.version || hubVersion || "1.1.0");
@@ -582,6 +661,7 @@ const TOOLS = [
       else if (info.ask) { res.ask_first = true; notes.push('The Claude Bridge window of "' + info.file + '" is set to Ask first: each change waits for the user\'s OK in Figma (they see what it will do), so say what you are about to change.'); }
       if (lateList) lateList.forEach((n) => notes.push(n));
       if (notes.length) res.notes = notes;
+      if (a.errors) { res.log = LOG_FILE; res.recent_errors = recentErrors(20); }
       return text(JSON.stringify(res, null, 2));
     }
   },
@@ -1220,15 +1300,24 @@ function prefixed(res, line) {
   else out.content.unshift({ type: "text", text: line });
   return out;
 }
+/* one line per tool call in the log: tool, time, size, and the error if any (never the content) */
+function firstText(res) { const c = res && res.content && res.content.find((x) => x.type === "text"); return c ? c.text : ""; }
+function logCall(name, args, res, t0, how) {
+  const head = name + " " + (Date.now() - t0) + "ms" + (how ? " " + how : "") + (args && args.file ? ' file "' + clipStr(args.file, 60) + '"' : "") + " args " + JSON.stringify(args || {}).length + "B";
+  if (res && res.isError) fileLog("error", head + ": " + clipStr(firstText(res).replace(/^Error: /, ""), 600));
+  else fileLog("call", head + (res && res.content ? " result " + res.content.reduce((n, c) => n + (c.text ? c.text.length : c.data ? c.data.length : 0), 0) + "B" : ""));
+}
 async function callTool(name, args, req) {
+  const t0 = Date.now();
   const tool = TOOLS.find((t) => t.name === name);
-  if (!tool) return { content: [{ type: "text", text: "Unknown tool: " + name }], isError: true };
+  if (!tool) { fileLog("error", "unknown tool " + clipStr(name, 80)); return { content: [{ type: "text", text: "Unknown tool: " + name }], isError: true }; }
   args = normalizeArgs(args);
-  if (tool.direct) return runTool(tool, args);
+  if (tool.direct) { const r = await runTool(tool, args); logCall(name, args, r, t0, name === "job" && args.id ? args.id : ""); return r; }
   const key = name + " " + stable(args);
   let call = calls.get(key), note = "";
   if (call && call.done) {
     seen(call);
+    logCall(name, args, call.result, t0, "(answer of an earlier identical call)");
     return prefixed(call.result, "[Note: this same call already ran " + ago(Date.now() - call.ended) + " ago" + (call.jid ? " (job " + call.jid + ")" : "") + " and its answer hadn't been seen; here it is. Nothing was done again.]");
   }
   if (call) note = "[Note: the same call was already running" + (call.jid ? " as job " + call.jid : "") + "; this waited for it instead of doing it twice.]";
@@ -1237,7 +1326,8 @@ async function callTool(name, args, req) {
   call.waiters++;
   const res = await within(call.promise, SOFT_MS);
   call.waiters--;
-  if (res === TIMEOUT) return jobReply(call);
+  if (res === TIMEOUT) { const r = jobReply(call); fileLog("call", name + " still running after " + (Date.now() - t0) + "ms: job " + call.jid); return r; }
+  logCall(name, args, res, t0, (note ? "(joined) " : "") + (req && req.cancelled ? "(cancelled by the client)" : ""));
   if (req && req.cancelled) return res;   // never sent: the result stays for a retry
   seen(call);
   return note ? prefixed(res, note) : res;
@@ -1428,6 +1518,7 @@ async function handle(msg) {
       default: return send({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found: " + method } });
     }
   } catch (e) {
+    fileLog("error", "request " + clipStr(method, 40) + " failed: " + (e && e.message ? e.message : String(e)));
     send({ jsonrpc: "2.0", id, error: { code: -32603, message: e && e.message ? e.message : String(e) } });
   }
 }
@@ -1445,6 +1536,7 @@ process.stdin.on("data", (chunk) => {
     handle(msg).catch((e) => log("request failed:", e && e.message ? e.message : String(e)));
   }
 });
-process.on("uncaughtException", (e) => log("unexpected error (kept running):", e && e.stack ? e.stack : String(e)));
-process.on("unhandledRejection", (e) => log("unexpected rejection (kept running):", e && e.message ? e.message : String(e)));
+process.on("uncaughtException", (e) => { log("unexpected error (kept running):", e && e.stack ? e.stack : String(e)); fileLog("crash", e && e.stack ? e.stack : String(e)); });
+process.on("unhandledRejection", (e) => { log("unexpected rejection (kept running):", e && e.message ? e.message : String(e)); fileLog("crash", "rejection: " + (e && e.stack ? e.stack : String(e))); });
+fileLog("info", "started " + VERSION + " (node " + process.version + ", " + process.platform + ")");
 process.stdin.on("end", () => { hubServers.forEach((s) => s.close()); process.exit(0); });

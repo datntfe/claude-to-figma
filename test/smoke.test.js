@@ -3,7 +3,7 @@
 const { spawn } = require("child_process");
 const assert = require("assert");
 const path = require("path");
-const srv = spawn(process.execPath, [path.join(__dirname, "..", "server", "index.js")], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: process.env.TEST_PORT_SMOKE || "3994" }) });
+const srv = spawn(process.execPath, [path.join(__dirname, "..", "server", "index.js")], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: process.env.TEST_PORT_SMOKE || "3994", FIGMA_BRIDGE_LOG: "off" }) });
 let out = "";
 const got = new Map();
 srv.stdout.on("data", (d) => {

@@ -3,3 +3,5 @@ node_modules/
 *.log
 __pycache__/
 *.bak-*
+logs/
+.logs/

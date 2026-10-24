@@ -9,7 +9,7 @@ const SERVER = path.join(__dirname, "..", "server", "index.js");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function startServer(name) {
-  const p = spawn(process.execPath, [SERVER], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT) }) });
+  const p = spawn(process.execPath, [SERVER], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), FIGMA_BRIDGE_LOG: "off" }) });
   let out = ""; const waiters = new Map(); let rid = 0;
   p.stdout.on("data", (d) => { out += d; let i; while ((i = out.indexOf("\n")) >= 0) { const m = JSON.parse(out.slice(0, i)); out = out.slice(i + 1); if (waiters.has(m.id)) { waiters.get(m.id)(m); waiters.delete(m.id); } } });
   p.stderr.on("data", (d) => process.stdout.write("   [" + name + "] " + d));
@@ -23,8 +23,8 @@ function fakePlugin(tag, file) {
   const connect = () => {
     if (stop) return;
     ws = new WebSocket("ws://localhost:" + PORT);
-    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.5.0", session: tag } }));
-    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.5.0" } : { by: tag, cmd: m.command, code: m.params.code, len: (m.params.code || "").length } })); };
+    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", info: { file: name, page: "Page 1", editorType: "figma", version: "1.5.1", session: tag } }));
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); ws.send(JSON.stringify({ type: "result", id: m.id, ok: true, result: m.command === "ping" ? { file: name, page: "Page 1", editorType: "figma", selection: 0, version: "1.5.1" } : { by: tag, cmd: m.command, code: m.params.code, len: (m.params.code || "").length } })); };
     let retried = false;
     const again = () => { if (!retried) { retried = true; setTimeout(connect, 300); } };
     ws.onclose = again;

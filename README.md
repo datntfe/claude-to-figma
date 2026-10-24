@@ -261,7 +261,7 @@ Claude sees these tools. With some clients they're prefixed with the server name
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `status` | — | Is the plugin connected? `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (count), `plugin_version`, the open `files` when there are several, `paused` (Look only) or `ask_first`, and `notes` when something needs updating. |
+| `status` | `errors` | Is the plugin connected? `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (count), `plugin_version`, the open `files` when there are several, `paused` (Look only) or `ask_first`, and `notes` when something needs updating. `errors: true` adds the recent errors from the bridge's log. |
 | `job` | `id`, `wait` (seconds, default 40), `cancel` | Calls still running after about 45 s answer with `{ job: "j3", status, progress }` instead of a result. `job` waits for it and returns the result; `cancel: true` drops a change that hasn't run yet (queued or waiting for your OK) or stops a running one at its next step. No `id`: the recent jobs. |
 | `get_context` | `activity` (default 15), `since_seconds`, `depth` (default 2), `max_layers` | What you're looking at and doing: file, page, selection (and text being edited), the viewport (zoom, bounds, the frame in focus at the centre of the screen, the layers in view) and recent activity (select, edit, create, delete, page, viewport, styles; by you, a collaborator or Claude). |
 | `get_selection` | `depth` (default 1), `brief`, `since` | Full details of each selected layer: path, position, size, fills/strokes as hex, radius, effects, auto layout and sizing, text and typography, styles, bound variables, variable modes, component info (main component, variant, key, library or local, property values), plus the colours in the selection. |
@@ -552,6 +552,8 @@ To run the server by hand for debugging:
 node ~/claude-figma-bridge/server/index.js
 # [figma-bridge] hub listening on ws://127.0.0.1:3055
 ```
+
+The bridge also keeps its own log in `logs/bridge.log` next to the server (`~/claude-figma-bridge/logs/bridge.log` with the installer): one line per tool call with its time and size or its error, connections, problems the plugin reports, and crashes, for every Claude window. Arguments and results are never written. Ask Claude for `status` with `errors: true` to see the recent ones. `FIGMA_BRIDGE_LOG` sets another file, or `off`.
 
 Logs go to stderr with the `[figma-bridge]` prefix. stdout is reserved for MCP. Claude desktop keeps MCP logs at `~/Library/Logs/Claude/` (macOS) or `%APPDATA%\Claude\logs\` (Windows).
 

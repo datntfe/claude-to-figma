@@ -8,7 +8,8 @@ const fs = require("fs");
 const os = require("os");
 const PORT = Number(process.env.TEST_PORT_JOBS || 3996);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-jobs-"));
-const ENV = Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_SOFT_MS: "1000", FIGMA_BRIDGE_ASK_MS: "200000" });
+const ENV = Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_SOFT_MS: "1000", FIGMA_BRIDGE_ASK_MS: "200000", FIGMA_BRIDGE_LOG: path.join(HOME, "bridge.log") });
+const LOG = path.join(HOME, "bridge.log");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* an MCP client talking to one server process over stdio */
@@ -37,9 +38,10 @@ const txt = (r) => r.content.find((x) => x.type === "text").text;
 const json = (r) => JSON.parse(txt(r).replace(/^\[[^\n]*\]\n/, ""));
 
 /* a fake Claude Bridge plugin: holds builds and updates until the test answers them */
-const info = { file: "Jobs file", page: "Page 1", editorType: "figma", version: "1.5.0", session: "sJ" };
+const info = { file: "Jobs file", page: "Page 1", editorType: "figma", version: "1.5.1", session: "sJ" };
 const held = [], cancels = [];
 let selection = { count: 1, selection: [{ id: "1:2", name: "Card" }] };
+let dropNextRead = false;
 function fakePlugin() {
   const ws = new WebSocket("ws://localhost:" + PORT);
   const p = { ws };
@@ -50,8 +52,8 @@ function fakePlugin() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === "cancel") { cancels.push(m); return; }
-    if (m.command === "ping") return p.answer(m, { file: info.file, page: "Page 1", editorType: "figma", selection: 1, version: "1.5.0" });
-    if (m.command === "get_selection") return p.answer(m, JSON.parse(JSON.stringify(selection)));
+    if (m.command === "ping") return p.answer(m, { file: info.file, page: "Page 1", editorType: "figma", selection: 1, version: "1.5.1" });
+    if (m.command === "get_selection") { if (dropNextRead) { dropNextRead = false; ws.close(); return; } return p.answer(m, JSON.parse(JSON.stringify(selection))); }
     if (m.command === "build" && m.params.look) return p.answer(m, { roots: [{ id: "1:9" }], created: 1, look: { base64: "iVBORw0KGgo=", width: 300, height: 200, id: "1:9", name: "Look at me" } });
     held.push(m);
   };
@@ -198,7 +200,36 @@ function fakePlugin() {
   assert.ok(/Stopped part way/.test(txt(await pcB)));
   console.log("relay: by, progress, cancel OK");
 
-  B.close(); A.close(); plugin.ws.close();
+  /* 1.5.1: a read waits for a plugin that is reconnecting, and is tried again when the line drops under it */
+  plugin.ws.close();
+  await sleep(150);
+  let p2 = null;
+  setTimeout(() => { p2 = fakePlugin(); }, 600);
+  t0 = Date.now();
+  r = json(await A.tool("get_selection", {}));
+  assert.ok(r.count === 2 && Date.now() - t0 >= 550, "waited for the plugin to come back: " + (Date.now() - t0) + "ms");
+  await p2.ready;
+  dropNextRead = true;
+  setTimeout(() => { p2 = fakePlugin(); }, 300);
+  r = json(await A.tool("get_selection", { depth: 2 }));
+  assert.equal(r.count, 2, "a read lost when the plugin dropped is tried again");
+  await p2.ready;
+  console.log("plugin coming back: reads wait and retry OK");
+
+  /* 1.5.1: the bridge's own log, problems from the plugin, status errors */
+  p2.send({ type: "problem", where: "nodechange", message: "TypeError: boom" });
+  await A.tool("run_code", { code: "return 'SECRET_DESIGN_TEXT'" }).catch(() => null);
+  await sleep(200);
+  const logText = fs.readFileSync(LOG, "utf8");
+  assert.ok(/ info started 1\.5\.1 /.test(logText) && / call build \d+ms/.test(logText) && / error update_nodes \d+ms.*Cancelled before it ran/.test(logText), logText.slice(-2000));
+  assert.ok(/ plugin "Jobs file" nodechange: TypeError: boom/.test(logText));
+  assert.ok(!/SECRET_DESIGN_TEXT|With progress|Look at me/.test(logText), "no arguments or content in the log");
+  const se = JSON.parse(txt(await A.tool("status", { errors: true })));
+  assert.ok(se.log === LOG && se.recent_errors.some((l) => /nodechange: TypeError: boom/.test(l)) && se.recent_errors.some((l) => /update_nodes/.test(l)), JSON.stringify(se.recent_errors));
+  console.log("bridge log + status errors OK");
+  const plugin2 = p2;
+
+  B.close(); A.close(); plugin2.ws.close();
   await sleep(200);
   console.log("ALL JOB TESTS PASSED");
   process.exit(0);

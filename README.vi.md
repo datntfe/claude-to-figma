@@ -261,7 +261,7 @@ Bridge có sẵn các prompt dựng sẵn, giống các gợi ý trong agent c�
 
 | Công cụ | Tham số | Việc |
 |---|---|---|
-| `status` | — | Plugin đã kết nối chưa: `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (số layer đang chọn), `plugin_version`, danh sách `files` khi mở nhiều file, `paused` (Look only) hoặc `ask_first`, và `notes` khi cần cập nhật. |
+| `status` | `errors` | Plugin đã kết nối chưa: `role` (hub/relay), `port`, `version`, `file`, `page`, `selection` (số layer đang chọn), `plugin_version`, danh sách `files` khi mở nhiều file, `paused` (Look only) hoặc `ask_first`, và `notes` khi cần cập nhật. `errors: true` kèm các lỗi gần đây trong log của bridge. |
 | `job` | `id`, `wait` (giây, mặc định 40), `cancel` | Lệnh chạy quá khoảng 45 giây trả về `{ job: "j3", status, progress }` thay cho kết quả. `job` chờ và trả kết quả; `cancel: true` huỷ thay đổi chưa chạy (đang xếp hàng hoặc chờ bạn duyệt) hoặc dừng thay đổi đang chạy ở bước kế tiếp. Không có `id`: các job gần đây. |
 | `get_context` | `activity` (mặc định 15), `since_seconds`, `depth` (mặc định 2), `max_layers` | Bạn đang xem và làm gì: file, page, vùng chọn (và đoạn text đang sửa), viewport (zoom, vùng hiển thị, frame ở giữa màn hình, các layer đang hiện) và thao tác gần đây (chọn, sửa, tạo, xoá, đổi page, cuộn/zoom, style; do bạn, người cộng tác hay Claude làm). |
 | `get_selection` | `depth` (mặc định 1), `brief`, `since` | Chi tiết từng layer đang chọn: đường dẫn, vị trí, kích thước, fill/stroke dạng hex, bo góc, effect, auto layout và sizing, text và typography, style, variable đang gắn, mode, thông tin component (main component, variant, key, library hay local, giá trị property), và các màu trong vùng chọn. |
@@ -552,6 +552,8 @@ Chạy server bằng tay để dò lỗi:
 node ~/claude-figma-bridge/server/index.js
 # [figma-bridge] hub listening on ws://127.0.0.1:3055
 ```
+
+Bridge còn tự ghi log ở `logs/bridge.log` cạnh server (`~/claude-figma-bridge/logs/bridge.log` nếu cài bằng installer): mỗi lệnh một dòng kèm thời gian và kích thước hoặc lỗi, kết nối, lỗi plugin báo về, và lỗi crash, cho mọi cửa sổ Claude. Không bao giờ ghi tham số hay kết quả. Nhờ Claude gọi `status` với `errors: true` để xem các lỗi gần đây. `FIGMA_BRIDGE_LOG` để đổi file, hoặc `off` để tắt.
 
 Log ghi ra stderr với tiền tố `[figma-bridge]`. stdout dành riêng cho MCP. Claude desktop lưu log MCP ở `~/Library/Logs/Claude/` (macOS) hoặc `%APPDATA%\Claude\logs\` (Windows).
 

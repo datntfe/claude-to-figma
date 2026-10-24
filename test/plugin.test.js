@@ -364,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.5.0"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.5.1"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.5.0"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.5.1"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -1087,6 +1087,15 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     assert.equal(ar.issues.length, 3, msgs.join("\n"));
     ok(await cmd("delete_nodes", { ids: [asked.id, t1.id, t2.id, t3.id, far.roots[0].id, lr.roots[0].id, card.id] }));
     console.log("look, overflow check OK");
+
+    // 1.5.1: a problem in an event handler is reported to the bridge's log instead of vanishing
+    toUI.length = 0;
+    emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("boom in handler"); } } }]);
+    const pb = toUI.find((m) => m.type === "problem");
+    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.5.1", JSON.stringify(pb));
+    for (let i = 0; i < 8; i++) emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("again"); } } }]);
+    assert.ok(toUI.filter((m) => m.type === "problem").length <= 5, "at most 5 a minute");
+    console.log("problems reported OK");
   }
 
   /* 1.4: new work lands beside the user's work, overlapping nothing */
@@ -1208,7 +1217,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.5.0");
+  assert.equal(sandbox.__claudeBridge.version, "1.5.1");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });

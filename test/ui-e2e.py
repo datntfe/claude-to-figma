@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SERVER = os.path.join(ROOT, "server", "index.js")
 PORT = os.environ.get("TEST_PORT_UI", "3997")
-ENV = dict(os.environ, FIGMA_BRIDGE_PORT=PORT)
+ENV = dict(os.environ, FIGMA_BRIDGE_PORT=PORT, FIGMA_BRIDGE_LOG="off")
 
 
 def start_server():
@@ -57,7 +57,7 @@ function finish(m, ok, result, summary) {
 }
 window.addEventListener('message', function (ev) {
   var m = ev.data && ev.data.pluginMessage; if (!m) return;
-  if (m.type === 'ui-ready') { post({ type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.5.0', session: window.__file } }); post({ type: 'prefs', mode: 'allow', follow: false }); }
+  if (m.type === 'ui-ready') { post({ type: 'hello', info: { file: window.__file, page: 'Page 1', editorType: 'figma', version: '1.5.1', session: window.__file } }); post({ type: 'prefs', mode: 'allow', follow: false }); }
   /* Ask first: build waits for the OK in the panel */
   if (m.type === 'command' && m.command === 'build') {
     window.__asked = m;
@@ -75,7 +75,7 @@ window.addEventListener('message', function (ev) {
   if (m.type === 'cancel') { (window.__panel = window.__panel || []).push(m); post({ type: 'progress', rid: m.rid, state: 'stopping' }); setTimeout(function () { finish(window.__long, false, 'Stopped part way through (cancelled).', ''); }, 50); return; }
   if (m.type === 'command') {
     var result = m.command === 'run_code' ? { value: 'ran ' + m.params.code.length + ' chars in ' + window.__file, logs: [] }
-      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.5.0' }
+      : m.command === 'ping' ? { file: window.__file, page: 'Page 1', editorType: 'figma', selection: 0, version: '1.5.1' }
       : { echo: m.command, file: window.__file };
     setTimeout(function () {
       window.postMessage({ pluginMessage: { type: 'result', id: m.id, ok: true, result: result } }, '*');

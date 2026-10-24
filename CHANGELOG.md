@@ -1,6 +1,17 @@
 # Changelog
 
-## 1.5.0
+## 1.5.1
+
+Fewer errors when Claude windows come and go, and a log to find the rest.
+
+- **A call waits for the plugin to come back** (up to 8 s, `FIGMA_BRIDGE_PLUGIN_WAIT_MS`) when it was connected a moment ago: another Claude window closed and the plugin is finding the new hub, Figma reloaded the plugin, the Mac woke up. Before, calls in those few seconds failed with "The Figma plugin is not connected". Figma not open at all still says so at once.
+- **A read lost to a dropped line is tried again once** (hub closed, plugin dropped). Changes are not repeated, as before.
+- **A call waits out a hub takeover** instead of failing with "The bridge is not ready".
+- **The bridge keeps its own log**, `logs/bridge.log` next to the server (`FIGMA_BRIDGE_LOG` for another file, `off` to turn it off): one line per tool call with its time and size or its error, connections, and crashes, shared by every Claude window. Arguments and results are never written. `status` with `errors: true` lists the recent errors.
+- **Problems in the plugin reach the log**: errors in its event handlers and in the panel, which used to vanish in Figma's console.
+- When a file's plugin was closed, the error says so ("Claude Bridge in "X" closed 12s ago: ask the user to run it again").
+
+
 
 Two things only: a better view and better control in the Claude Bridge window, and a sturdier link for Claude to work through.
 

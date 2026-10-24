@@ -268,7 +268,7 @@
   // Messages from the plugin's main thread that go to the bridge server:
   // results, hello (who we are), info (page changed, Look only / Ask first), activity (the user did something here),
   // progress (queued, waiting for the user's OK, running n of m). "done", "ask", "asked", "prefs" and "saved" are for this window only.
-  var FORWARD = { result: 1, hello: 1, info: 1, activity: 1, progress: 1 };
+  var FORWARD = { result: 1, hello: 1, info: 1, activity: 1, progress: 1, problem: 1 };
   window.onmessage = function (ev) {
     var m = ev.data && ev.data.pluginMessage;
     if (!m) return;
@@ -289,6 +289,11 @@
     if (m.type === "result") { outbox.push(m); if (outbox.length > 50) outbox.shift(); }
   }
   function flush() { var q = outbox; outbox = []; for (var i = 0; i < q.length; i++) send(q[i]); }
+  // errors in this window go to the bridge's log too (at most 5)
+  var uiProblems = 0;
+  function uiProblem(msg) { if (uiProblems++ < 5) send({ type: "problem", where: "panel", message: String(msg).slice(0, 600) }); }
+  window.addEventListener("error", function (e) { uiProblem((e.message || "error") + (e.filename ? " @" + e.lineno + ":" + e.colno : "")); });
+  window.addEventListener("unhandledrejection", function (e) { uiProblem("unhandled: " + (e.reason && e.reason.message ? e.reason.message : e.reason)); });
   // Bringing this file's tab to the front counts as activity, so Claude knows which file you are in.
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") send({ type: "activity", what: "focus" }); });
   window.addEventListener("focus", function () { send({ type: "activity", what: "focus" }); });
