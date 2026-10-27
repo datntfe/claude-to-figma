@@ -28,7 +28,7 @@ const pathMod = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.6.2";
+const VERSION = "1.6.3";
 const log = (...a) => { const t = a.join(" "); process.stderr.write("[figma-bridge] " + t + "\n"); fileLog("info", t); };
 
 /* ---------------- the bridge's own log ----------------
@@ -165,6 +165,7 @@ let seq = 0;
 const late = new Map();       // command id -> { command, at, key }
 const lateNotes = new Map();  // file identity -> [notes]
 const recentDrops = new Map();// file identity -> { at, label }: a file whose plugin dropped without closing (reconnecting)
+const STUCK_CODE = " The code was probably stuck (a very long loop, or waiting on something that never finishes): split the work into smaller run_code calls, look at one frame instead of the whole page, and call h.progress(i, n) inside loops (the Cancel button works then).";
 const MAYBE_APPLIED = " If this was a change, it may still have been applied in Figma: check with get_context (recent activity) or a screenshot before trying again, so nothing is done twice.";
 /* Long calls: MCP clients give up on a call after about a minute (Cowork sooner) and a retried change
    would then run twice. A call still running after SOFT_MS answers with a job id instead (see `job`). */
@@ -269,7 +270,7 @@ function hubCallPlugin(command, params, timeout, target, write, opts) {
       pending.delete(id);
       clearTimeout(entry.grace);
       if (write) { late.set(id, { command: command, at: at, key: identity(entry.plugin) }); setTimeout(() => late.delete(id), 30 * 60000); }
-      reject(new Error("Timed out after " + Math.round(timeout / 1000) + "s waiting for Figma (" + command + ")." + (write ? MAYBE_APPLIED : "")));
+      reject(new Error("Timed out after " + Math.round(timeout / 1000) + "s waiting for Figma (" + command + ")." + (write ? MAYBE_APPLIED : "") + (command === "run_code" ? STUCK_CODE : "")));
     }, timeout);
     pending.set(id, entry);
     const msg = { id: id, command: command, params: params || {} };

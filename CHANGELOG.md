@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.3
+
+The log after 1.6.2 had no new bridge errors: what remained was code sent to Figma using its API wrongly, and a few `run_code` calls that ran for minutes.
+
+- **Hints for the mistakes seen most.** The error text now ends with a fix for: `strokes`/`fills` given the wrong shape, `layoutGrow` other than 0 or 1, `layoutPositioning = ABSOLUTE` outside an auto-layout frame, `combineAsVariants` arguments and page, component sets with errors (the old hint missed the "for node" wording) and names the code never declared.
+- **More Figma calls are watched** (images, local styles, variables, team library), so a slow `run_code` more often says what it waits on.
+- **A `run_code` that is busy for a long time says so.** The panel shows "its own code is busy (a long loop?)" after 30 s, and the log and the 5-minute timeout message tell Claude to split the work, look at one frame instead of the page, and use `h.progress(i, n)` in loops (the Cancel button works then).
+
 ## Installer fix (after 1.6.2)
 
 - Claude started the bridge with the exact node it found at install time (for example `~/.local/bin/node`). When that node moved or was removed, the bridge silently stopped starting and the plugin stayed red ("Not connected"). Claude now starts `server/start.sh`, which finds Node.js each time (Homebrew, `/usr/local`, `~/.local/bin`, nvm, volta, mise, asdf, or a login shell). Run `./install-mac.sh` once to switch an existing setup over; it also finds Node.js when it isn't on the PATH.

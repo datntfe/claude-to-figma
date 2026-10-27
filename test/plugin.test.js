@@ -364,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.2"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.3"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.2"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.3"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -1092,7 +1092,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     toUI.length = 0;
     emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("boom in handler"); } } }]);
     const pb = toUI.find((m) => m.type === "problem");
-    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.2", JSON.stringify(pb));
+    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.3", JSON.stringify(pb));
     for (let i = 0; i < 8; i++) emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("again"); } } }]);
     assert.ok(toUI.filter((m) => m.type === "problem").length <= 5, "at most 5 a minute");
     console.log("problems reported OK");
@@ -1213,6 +1213,22 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     assert.ok(/Hint: Use the Async version/.test(r.error));
     holder.remove();
     console.log("1.6.2: font hang, h.findAll, hints OK");
+    // 1.6.3: hints for the API mistakes seen in the log
+    const hintCases = [
+      ['Property "strokes" failed validation: [0].type Expected one of SOLID', /Hint: .*h\.solid/],
+      ['Property "layoutGrow" failed validation: expected 0 expected 1', /Hint: layoutGrow is 0/],
+      ['in set_layoutPositioning: Can only set layoutPositioning = ABSOLUTE if the parent node has layoutMode !== NONE', /Hint: Absolute positioning/],
+      ['in combineAsVariants: Second argument to combineAsVariants() must be provided', /Hint: figma\.combineAsVariants/],
+      ['in combineAsVariants: Grouped nodes must be in the same page as the parent', /Hint: figma\.combineAsVariants/],
+      ['in get_componentProperties: Component set for node has existing errors', /Hint: That component set/],
+      ["'inpSet' is not defined", /Hint: The code uses a name/]
+    ];
+    for (const [msg, re] of hintCases) {
+      r = await cmd("run_code", { code: "throw new Error(" + JSON.stringify(msg) + ")" });
+      assert.ok(!r.ok && re.test(r.error), msg + " → " + r.error);
+    }
+    assert.equal(typeof figma.createImageAsync === "function" ? !!figma.createImageAsync.__watched : true, true, "more Figma async calls are watched");
+    console.log("1.6.3: error hints OK");
     console.log("1.6.1 fixes (own h/log, compile hint, error hints, network retry, h.loadFonts, page screenshot, cancel release) OK");
   }
 
@@ -1335,7 +1351,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.6.2");
+  assert.equal(sandbox.__claudeBridge.version, "1.6.3");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });

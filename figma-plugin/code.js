@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.6.2";
+const VERSION = "1.6.3";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
@@ -3240,7 +3240,12 @@ const HINTS = [
   [/sublayer or table cell\) with id "I/, "Figma sometimes keeps layers inside instances that no longer exist, and findAll/findOne crash on them. Use h.findAll(root, n => …) (it skips them), and find layers again (find_nodes) instead of reusing old I…;… ids."],
   [/has not been explicitly loaded/i, "Load the page first: await page.loadAsync() (or await figma.loadAllPagesAsync() for the whole file)."],
   [/documentAccess: dynamic-page/i, "Use the Async version: await figma.getNodeByIdAsync(id), await node.getMainComponentAsync(), await figma.getStyleByIdAsync(id), and await page.loadAsync() before reading another page."],
-  [/Component set has existing errors/i, "That component set has errors in Figma (often two variants with the same name): fix it in Figma, or work on its components one by one."],
+  [/Component set (for node )?has existing errors/i, "That component set has errors in Figma (often two variants with the same name, or a variant that isn't a component): fix it in Figma, or work on its components one by one instead of reading the set's properties."],
+  [/Property "(strokes|fills|effects)" failed validation|\[0\]\.type/i, "strokes, fills and effects take paint/effect objects in an array, not strings: n.strokes = h.solid('#RRGGBB') (or [{ type: 'SOLID', color: { r, g, b } }]); the thickness is the separate n.strokeWeight."],
+  [/Property "layoutGrow" failed validation/i, "layoutGrow is 0 (keep size) or 1 (fill the free space), nothing in between; for a fixed share use layoutSizingHorizontal / layoutSizingVertical = 'FILL' | 'HUG' | 'FIXED'."],
+  [/layoutPositioning = ABSOLUTE/i, "Absolute positioning only works inside an auto-layout frame: give the parent a layoutMode ('HORIZONTAL' | 'VERTICAL') first, or just set x/y on a child of a plain frame."],
+  [/combineAsVariants\(\) must be provided|must be in the same page as the parent/i, "figma.combineAsVariants(components, parent) takes an array of components and a parent frame/page on the same page as them: figma.combineAsVariants(list, list[0].parent)."],
+  [/\bis not defined/i, "The code uses a name that was never declared (a typo, or a variable from an earlier run_code: each run starts fresh). Declare it with const/let in this run."],
   [/cannot read property '[^']+' of (undefined|null)/i, "Something the code looked up wasn't there (a find returned null, or the layer is of another type): check it before using it."],
   [/This node type can't be exported/i, "Export a frame, group or layer on the page, not the page or document itself."]
 ];
@@ -3297,7 +3302,9 @@ function patchFigma(obj, names, retry) {
 }
 safe(function () { patchFigma(figma, ["loadFontAsync", "listAvailableFontsAsync", "importComponentByKeyAsync", "importComponentSetByKeyAsync", "importStyleByKeyAsync"], true); });
 safe(function () { patchFigma(figma.variables, ["importVariableByKeyAsync"], true); });
-safe(function () { patchFigma(figma, ["loadAllPagesAsync", "saveVersionHistoryAsync", "setCurrentPageAsync", "getNodeByIdAsync", "getStyleByIdAsync"], false); });
+safe(function () { patchFigma(figma, ["loadAllPagesAsync", "saveVersionHistoryAsync", "setCurrentPageAsync", "getNodeByIdAsync", "getStyleByIdAsync", "createImageAsync", "createVideoAsync", "getLocalPaintStylesAsync", "getLocalTextStylesAsync", "getLocalEffectStylesAsync", "getLocalGridStylesAsync"], false); });
+safe(function () { patchFigma(figma.variables, ["getLocalVariablesAsync", "getLocalVariableCollectionsAsync", "getVariableByIdAsync", "getVariableCollectionByIdAsync", "createVariableAliasByIdAsync"], false); });
+safe(function () { if (figma.teamLibrary) patchFigma(figma.teamLibrary, ["getAvailableLibraryVariableCollectionsAsync", "getVariablesInLibraryCollectionAsync", "getAvailableLibraryStyleCollectionsAsync"], false); });
 
 /* ---------- the panel: approvals, progress, cancel, follow ---------- */
 const STOPPED = "Stopped part way through (cancelled): what it did before stopping stays in the file (one Cmd+Z undoes it).";
@@ -3403,8 +3410,8 @@ function watchSlow(msg) {
     const sec = Math.round((Date.now() - t0) / 1000);
     if (sec < 15) return;
     const stuck = apiStuck();
-    if (!r.total) progressOut(msg.id, { state: "running", text: stuck || "running its own code" });
-    if (sec >= 50 && !told) { told = true; reportProblem("slow " + msg.command, msg.command + " still running after " + sec + "s: " + (stuck || "no Figma call pending (the code itself is busy or awaiting something else)")); }
+    if (!r.total) progressOut(msg.id, { state: "running", text: stuck || (sec >= 30 ? "its own code is busy (a long loop?)" : "running its own code") });
+    if (sec >= 50 && !told) { told = true; reportProblem("slow " + msg.command, msg.command + " still running after " + sec + "s: " + (stuck || "no Figma call pending (the code itself is busy: a loop over many layers, or waiting on a node method such as exportAsync / getMainComponentAsync / loadAsync; h.progress(i, n) inside long loops lets Cancel work and shows where it is)")); }
   }, 5000));
 }
 function cancelledText(by) { return "Cancelled before it ran" + (by === "claude" ? "" : " (by the user in Figma)") + ". Nothing was changed."; }
