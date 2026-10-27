@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.6.1";
+const VERSION = "1.6.2";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
@@ -153,6 +153,23 @@ const H = {
   shader: function (node, spec) { return applyShader(node, spec, makeCtx()); },
   /* shows progress in the Claude Bridge window; throws when the user presses Cancel there */
   progress: function (done, total, text) { if (stopRequested()) throw new Error(STOPPED); progress(done, total, text); },
+  /* findAll that skips broken layers inside instances instead of crashing */
+  findAll: function (root, test) {
+    const out = [];
+    (function walk(n) {
+      let kids = null;
+      try { kids = n.children; } catch (e) { return; }
+      if (!kids) return;
+      for (let i = 0; i < kids.length; i++) {
+        const c = kids[i];
+        let hit = false;
+        try { hit = !test || !!test(c); } catch (e) { continue; }
+        if (hit) out.push(c);
+        walk(c);
+      }
+    })(root || figma.currentPage);
+    return out;
+  },
   /* every font a text layer (or the text layers inside a frame) uses, mixed fonts included */
   loadFonts: async function (node) {
     const texts = node.type === "TEXT" ? [node] : ("findAllWithCriteria" in node ? node.findAllWithCriteria({ types: ["TEXT"] }) : []);
@@ -3220,7 +3237,9 @@ const HINTS = [
   [/unloaded font/i, "Load the fonts first: await h.loadFonts(node) loads every font a text layer (or the text inside a frame) uses, mixed fonts included."],
   [/'\d+' is read-only|read-only|not extensible/i, "Figma's arrays (fills, strokes, effects, …) are frozen: copy, change, assign back, e.g. const f = JSON.parse(JSON.stringify(n.fills)); f[0].opacity = 0.5; n.fills = f."],
   [/color\.a/, "Gradient stop colours need { r, g, b, a } (a is required); a solid paint's color is { r, g, b } with opacity on the paint."],
-  [/sublayer or table cell\) with id "I/, "Ids inside instances (I…;…) change when an instance is swapped or reset: find the layer again (find_nodes) instead of reusing an old id."],
+  [/sublayer or table cell\) with id "I/, "Figma sometimes keeps layers inside instances that no longer exist, and findAll/findOne crash on them. Use h.findAll(root, n => …) (it skips them), and find layers again (find_nodes) instead of reusing old I…;… ids."],
+  [/has not been explicitly loaded/i, "Load the page first: await page.loadAsync() (or await figma.loadAllPagesAsync() for the whole file)."],
+  [/documentAccess: dynamic-page/i, "Use the Async version: await figma.getNodeByIdAsync(id), await node.getMainComponentAsync(), await figma.getStyleByIdAsync(id), and await page.loadAsync() before reading another page."],
   [/Component set has existing errors/i, "That component set has errors in Figma (often two variants with the same name): fix it in Figma, or work on its components one by one."],
   [/cannot read property '[^']+' of (undefined|null)/i, "Something the code looked up wasn't there (a find returned null, or the layer is of another type): check it before using it."],
   [/This node type can't be exported/i, "Export a frame, group or layer on the page, not the page or document itself."]
@@ -3237,19 +3256,48 @@ async function netRetry(fn, self, args) {
     catch (e) { if (i >= 2 || !NET_ERR.test(String(e && e.message))) throw e; await new Promise(function (r) { setTimeout(r, 1000 * (i + 1)); }); }
   }
 }
-function patchRetry(obj, names) {
+/* Figma calls Claude's code waits on are watched: which one a slow run_code is stuck on shows in the panel,
+   in job status and in the log; font and library loads that hang get a clear error instead of a timeout. */
+const API_PENDING = new Map();
+let apiSeq = 0;
+const API_TIMEOUTS = { loadFontAsync: 45000, importComponentByKeyAsync: 90000, importComponentSetByKeyAsync: 90000, importStyleByKeyAsync: 90000, importVariableByKeyAsync: 90000 };
+function apiWhat(k, args) {
+  const a = args && args[0];
+  if (a && typeof a === "object" && a.family) return k + "(" + a.family + " " + (a.style || "") + ")";
+  if (typeof a === "string") return k + "(" + clip(a, 40) + ")";
+  return k + "()";
+}
+function apiStuck() {
+  let worst = null;
+  API_PENDING.forEach(function (c) { if (!worst || c.at < worst.at) worst = c; });
+  return worst ? "waiting on figma." + worst.what + " for " + Math.round((Date.now() - worst.at) / 1000) + "s" : "";
+}
+function hangError(k, what, ms) {
+  if (k === "loadFontAsync") return new Error("Figma didn't finish " + what + " within " + Math.round(ms / 1000) + " s. A font installed on this computer needs Figma's font helper: restart Figma, or use a font from await figma.listAvailableFontsAsync(). Nothing after this line of the code ran.");
+  return new Error("Figma didn't finish " + what + " within " + Math.round(ms / 1000) + " s (its connection to the library may be stuck). Nothing after this line of the code ran; try again in a moment.");
+}
+function patchFigma(obj, names, retry) {
   names.forEach(function (k) {
     try {
       const orig = obj[k];
-      if (typeof orig !== "function" || orig.__retry) return;
-      const wrapped = function () { return netRetry(orig, obj, arguments); };
-      wrapped.__retry = true;
+      if (typeof orig !== "function" || orig.__watched) return;
+      const wrapped = function () {
+        const args = arguments, id = ++apiSeq, what = apiWhat(k, args);
+        API_PENDING.set(id, { what: what, at: Date.now() });
+        const run = retry ? netRetry(orig, obj, args) : Promise.resolve().then(function () { return orig.apply(obj, args); });
+        const ms = API_TIMEOUTS[k];
+        let timer = null;
+        const guarded = ms ? Promise.race([run, new Promise(function (_, rej) { timer = setTimeout(function () { rej(hangError(k, what, ms)); }, ms); })]) : run;
+        return guarded.then(function (v) { clearTimeout(timer); API_PENDING.delete(id); return v; }, function (e) { clearTimeout(timer); API_PENDING.delete(id); throw e; });
+      };
+      wrapped.__watched = true;
       obj[k] = wrapped;
     } catch (e) { /* read-only: left as it is */ }
   });
 }
-safe(function () { patchRetry(figma, ["loadFontAsync", "listAvailableFontsAsync", "importComponentByKeyAsync", "importComponentSetByKeyAsync", "importStyleByKeyAsync"]); });
-safe(function () { patchRetry(figma.variables, ["importVariableByKeyAsync"]); });
+safe(function () { patchFigma(figma, ["loadFontAsync", "listAvailableFontsAsync", "importComponentByKeyAsync", "importComponentSetByKeyAsync", "importStyleByKeyAsync"], true); });
+safe(function () { patchFigma(figma.variables, ["importVariableByKeyAsync"], true); });
+safe(function () { patchFigma(figma, ["loadAllPagesAsync", "saveVersionHistoryAsync", "setCurrentPageAsync", "getNodeByIdAsync", "getStyleByIdAsync"], false); });
 
 /* ---------- the panel: approvals, progress, cancel, follow ---------- */
 const STOPPED = "Stopped part way through (cancelled): what it did before stopping stays in the file (one Cmd+Z undoes it).";
@@ -3343,6 +3391,21 @@ function notApproved(why) {
   if (why === "paused") return 'Not applied: the user switched the Claude Bridge window to "Look only" while this change waited. Nothing was changed.';
   if (/^cancelled/.test(why)) return cancelledText(why.split(":")[1]);
   return "The user declined this change in Figma (the Claude Bridge window is set to Ask first). Nothing was changed; ask them what to do differently.";
+}
+/* a change running long says what it waits on (panel, job status) and, past 50 s, tells the log */
+const SLOW = new Map();
+function watchSlow(msg) {
+  const t0 = Date.now();
+  let told = false;
+  SLOW.set(msg.id, setInterval(function () {
+    const r = RUNNING.get(msg.id);
+    if (!r) return;
+    const sec = Math.round((Date.now() - t0) / 1000);
+    if (sec < 15) return;
+    const stuck = apiStuck();
+    if (!r.total) progressOut(msg.id, { state: "running", text: stuck || "running its own code" });
+    if (sec >= 50 && !told) { told = true; reportProblem("slow " + msg.command, msg.command + " still running after " + sec + "s: " + (stuck || "no Figma call pending (the code itself is busy or awaiting something else)")); }
+  }, 5000));
 }
 function cancelledText(by) { return "Cancelled before it ran" + (by === "claude" ? "" : " (by the user in Figma)") + ". Nothing was changed."; }
 function cancelCommand(rid, by) {
@@ -3536,6 +3599,7 @@ async function runCommand(msg, write) {
       }
       RUNNING.set(msg.id, { cancel: false, sent: 0 });
       curWrite = msg.id;
+      watchSlow(msg);
       busyStart(msg.id);   // not while it waited: what the user did meanwhile is theirs
       progressOut(msg.id, { state: "running" });
     }
@@ -3550,7 +3614,7 @@ async function runCommand(msg, write) {
     error = withHint(String(e && e.message ? e.message : e));
     figma.ui.postMessage({ type: "result", id: msg.id, ok: false, error: error });
   } finally {
-    if (write) { RUNNING.delete(msg.id); if (curWrite === msg.id) curWrite = null; }
+    if (write) { RUNNING.delete(msg.id); if (curWrite === msg.id) curWrite = null; clearInterval(SLOW.get(msg.id)); SLOW.delete(msg.id); }
     busyEnd(msg.id);
     if (MUTATING[msg.command]) { try { figma.commitUndo(); } catch (e) { /* not available */ } }
     try { lastVp = vpSnap(); } catch (e) { /* closing */ }
@@ -3628,4 +3692,4 @@ watchPage();
 loadPrefs();
 safe(cleanupTemp);
 setInterval(safely("viewport", pollViewport), 1500);
-globalThis.__claudeBridge = { version: VERSION, handlers: handlers, activity: ACT, describe: H.describe };
+globalThis.__claudeBridge = { version: VERSION, handlers: handlers, activity: ACT, describe: H.describe, timeouts: API_TIMEOUTS };

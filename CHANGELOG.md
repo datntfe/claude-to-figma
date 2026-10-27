@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.2
+
+The log after 1.6.1 showed the same `run_code` timeouts. Claude hadn't been restarted, so the bridge was still 1.6.0, and some `run_code` calls never finished because they waited on something in Figma.
+
+- **The plugin window says when the bridge is older than the plugin** ("Quit Claude completely (Cmd+Q) and open it again"). Bridge fixes only apply after that restart, and nothing showed it before.
+- **A slow change says what it waits on.** After 15 s the panel row, and the `job` status Claude sees, show which Figma call it waits on ("waiting on figma.loadFontAsync(Be Vietnam Pro SemiBold) for 40s") or that the code itself is busy. After 50 s this goes to the log too.
+- **A font load that never finishes becomes a clear error** after 45 s (a font installed on the computer needs Figma's font helper), and a library import after 90 s, instead of an unexplained timeout.
+- **`h.findAll(root, test)`** skips the broken layers inside instances that make Figma's `findAll`/`findOne` crash ("in get_name: The node … does not exist"); the hint says so.
+- Hints for `documentAccess: dynamic-page` errors (use the Async calls) and for pages that aren't loaded yet.
+
 ## 1.6.1
 
 Fixes for what the bridge's own log showed over three days of real work (1,683 lines: 942 `run_code`, 99 errors, 38 dropped plugin connections).

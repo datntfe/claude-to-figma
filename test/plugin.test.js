@@ -272,7 +272,7 @@ const figma = {
   off(ev) { delete listeners[ev]; },
   commitUndo() { figma._commits++; },
   async saveVersionHistoryAsync(title) { figma._versions.push(title); return { id: "v" + figma._versions.length }; },
-  async loadFontAsync(f) { if (figma._netFail > 0) { figma._netFail--; throw new Error("Unable to establish connection to Figma after 10 seconds. Please check your internet connection."); } fonts.add(f.family + f.style); },
+  async loadFontAsync(f) { if (f.family === "Hang") return new Promise(() => { }); if (figma._netFail > 0) { figma._netFail--; throw new Error("Unable to establish connection to Figma after 10 seconds. Please check your internet connection."); } fonts.add(f.family + f.style); },
   async loadAllPagesAsync() { figma._allPagesLoaded = true; },
   async getNodeByIdAsync(id) { return all.get(id) || null; },
   async setCurrentPageAsync(p) { current = p; if (listeners.currentpagechange) listeners.currentpagechange(); },
@@ -348,7 +348,7 @@ for (const c of [libButtonM, libButtonL]) { c._props = { "Label#1:0": { type: "T
 
 const code = fs.readFileSync(path.join(__dirname, "..", "figma-plugin", "code.js"), "utf8");
 const intervals = [];
-const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout, clearTimeout, fetch: (...a) => figma._fetch(...a) };
+const sandbox = { figma, __html__: "<html>", console, Promise, Object, Array, Math, String, JSON, Uint8Array, Map, Set, Error, parseInt, parseFloat, isFinite, Number, RegExp, Symbol, Date: Object.assign(function (...a) { return a.length ? new Date(...a) : new Date(clock.t); }, { now: () => clock.t }), setInterval: (fn) => { intervals.push(fn); return intervals.length; }, setTimeout, clearTimeout, clearInterval: () => { }, fetch: (...a) => figma._fetch(...a) };
 sandbox.globalThis = sandbox;
 vm.runInNewContext(code, sandbox);
 let mid = 0;
@@ -364,15 +364,15 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.1"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.2"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.1"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.2"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
   assert.equal(r.value.name, "Card"); assert.deepEqual(r.logs, ["made Card"]);
-  assert.equal(figma._commits, commits0 + 1, "each changing command is its own undo step");
+  assert.equal(figma._commits, commits0 + 1, "each changing command is its own undo step " + figma._commits + " vs " + commits0);
   const cardId = r.value.id; console.log("run_code OK + commitUndo");
   r = ok(await cmd("run_code", { code: "globalThis.lib = { n: 41 }; return 1" }));
   r = ok(await cmd("run_code", { code: "return globalThis.lib.n + 1" }));
@@ -1092,7 +1092,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     toUI.length = 0;
     emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("boom in handler"); } } }]);
     const pb = toUI.find((m) => m.type === "problem");
-    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.1", JSON.stringify(pb));
+    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.2", JSON.stringify(pb));
     for (let i = 0; i < 8; i++) emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("again"); } } }]);
     assert.ok(toUI.filter((m) => m.type === "problem").length <= 5, "at most 5 a minute");
     console.log("problems reported OK");
@@ -1189,6 +1189,30 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     await pk2;
     assert.ok(fr.name === "After cancel" && Date.now() - tc >= 2900 && Date.now() - tc < 4500, "released after " + (Date.now() - tc));
     ok(await cmd("delete_nodes", { ids: [fr.id] }));
+    // 1.6.2: a font load that never finishes becomes a clear error; findAll that skips broken instance layers
+    sandbox.__claudeBridge.timeouts.loadFontAsync = 150;
+    r = await cmd("run_code", { code: "await figma.loadFontAsync({ family: 'Hang', style: 'Bold' }); return 'never'" });
+    assert.ok(!r.ok && /didn't finish loadFontAsync\(Hang Bold\) within 0 s.*font helper/.test(r.error), r.error);
+    sandbox.__claudeBridge.timeouts.loadFontAsync = 400;
+    toUI.length = 0;
+    const nIv = intervals.length;
+    const slowP = uiHandler({ type: "command", id: "s1", command: "run_code", params: { code: "await figma.loadFontAsync({ family: 'Hang', style: 'Black' })" } });
+    await new Promise((res) => setTimeout(res, 20));
+    tick(61000); intervals[nIv]();
+    assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "s1" && /^waiting on figma\.loadFontAsync\(Hang Black\) for 61s$/.test(m.text)), JSON.stringify(toUI.filter((m) => m.type === "progress")));
+    assert.ok(toUI.find((m) => m.type === "problem" && /run_code still running after 61s: waiting on figma\.loadFontAsync/.test(m.message)), "a slow change tells the log what it waits on");
+    await slowP;
+    sandbox.__claudeBridge.timeouts.loadFontAsync = 45000;
+    const holder = figma.createFrame(); holder.name = "Holder";
+    const ghost = figma.createFrame(); holder.appendChild(ghost); Object.defineProperty(ghost, "name", { get() { throw new Error('in get_name: The node (instance sublayer or table cell) with id "I1:2;3:4" does not exist'); } });
+    const fine2 = figma.createText(); fine2.name = "Keep me"; holder.appendChild(fine2);
+    assert.deepEqual(ok(await cmd("run_code", { code: "return h.findAll(await figma.getNodeByIdAsync('" + holder.id + "'), (n) => n.name.startsWith('Keep')).map((n) => n.name)" })).value, ["Keep me"]);
+    r = await cmd("run_code", { code: "return (await figma.getNodeByIdAsync('" + holder.id + "')).findAll((n) => n.name === 'x').length" });
+    assert.ok(!r.ok && /Hint: .*h\.findAll/.test(r.error), r.error);
+    r = await cmd("run_code", { code: "throw new Error('in get_mainComponent: Cannot call with documentAccess: dynamic-page. Use node.getMainComponentAsync instead.')" });
+    assert.ok(/Hint: Use the Async version/.test(r.error));
+    holder.remove();
+    console.log("1.6.2: font hang, h.findAll, hints OK");
     console.log("1.6.1 fixes (own h/log, compile hint, error hints, network retry, h.loadFonts, page screenshot, cancel release) OK");
   }
 
@@ -1311,7 +1335,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.6.1");
+  assert.equal(sandbox.__claudeBridge.version, "1.6.2");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });

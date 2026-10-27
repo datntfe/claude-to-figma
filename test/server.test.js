@@ -86,7 +86,7 @@ function rawPlugin(info, onCommand) {
   await sleep(400);
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
   assert.equal(init.result.protocolVersion, "2025-06-18");
-  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.6.1");
+  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.6.2");
   assert.ok(init.result.capabilities.prompts && /get_context/.test(init.result.instructions));
   srv.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
@@ -134,7 +134,7 @@ function rawPlugin(info, onCommand) {
 
   /* one file */
   const big = Buffer.alloc(3 * 1024 * 1024, 7).toString("base64"); // ~4 MB string
-  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.6.1", session: "sA" };
+  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.6.2", session: "sA" };
   let heldId = null, slowId = null, aPaused = false;
   const handlerA = (m) => {
     if (m.command === "ping") return Object.assign(ping(infoA), aPaused ? { paused: true } : {});
@@ -153,7 +153,7 @@ function rawPlugin(info, onCommand) {
   r = await tool("status");
   const st = JSON.parse(txt(r));
   console.log("status:", txt(r).replace(/\s+/g, " "));
-  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.6.1"); assert.ok(!st.notes && !st.files);
+  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.6.2"); assert.ok(!st.notes && !st.files);
 
   const longCode = "// " + "x".repeat(300000) + "\nreturn 1";   // > 64 KB → 64-bit frame length, server→client
   r = await tool("run_code", { code: longCode });
@@ -213,7 +213,7 @@ function rawPlugin(info, onCommand) {
     const pdf = JSON.parse(txt(r)).files[0];
     assert.equal(path.dirname(pdf.path), outDir, pdf.path);
     // only the connection a command went to may answer it; ids can't be guessed
-    const infoZ = { file: "Zeta", page: "P", editorType: "figma", version: "1.6.1", session: "sZ" };
+    const infoZ = { file: "Zeta", page: "P", editorType: "figma", version: "1.6.2", session: "sZ" };
     const Z = fakePlugin(infoZ, (m) => (m.command === "ping" ? ping(infoZ) : undefined));
     await Z.ready;
     const held = tool("get_tree", { node_id: "hold", file: "Product" });
@@ -285,9 +285,9 @@ function rawPlugin(info, onCommand) {
     console.log("ids, budget, paused, annotations OK (catalog " + catalog + " chars)");
 
     // a dropped socket gets a moment to come back; meanwhile changes without file don't go elsewhere
-    const infoR = { file: "Raw file", page: "P", editorType: "figma", version: "1.6.1", session: "sR" };
+    const infoR = { file: "Raw file", page: "P", editorType: "figma", version: "1.6.2", session: "sR" };
     let rawHeld = null;
-    const onCmd = (m, send) => { if (m.command === "ping") send({ type: "result", id: m.id, ok: true, result: ping(infoR) }); else rawHeld = m; };
+    const onCmd = (m, send) => { if (m.command === "ping") send({ type: "result", id: m.id, ok: true, result: ping(infoR) }); else if (m.command) rawHeld = m; };
     const R1 = await rawPlugin(infoR, onCmd);
     const pend = tool("run_code", { code: "return 1", file: "Raw file" });
     await sleep(120);
@@ -308,7 +308,7 @@ function rawPlugin(info, onCommand) {
   }
 
   /* a second file: the library */
-  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.6.1", session: "sB" };
+  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.6.2", session: "sB" };
   let holdB = false;
   const B = fakePlugin(infoB, (m) => {
     if (m.command === "ping") return ping(infoB);

@@ -122,9 +122,11 @@
   function setStatus(state, text) {
     dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : "");
     statusEl.textContent = text;
-    statusEl.className = state === "on" ? (modeEl.value === "off" ? "paused" : modeEl.value === "ask" ? "askfirst" : "") : "";
+    statusEl.className = state === "on" ? (/older bridge/.test(text) ? "paused" : modeEl.value === "off" ? "paused" : modeEl.value === "ask" ? "askfirst" : "") : "";
   }
   function connectedText() {
+    var pv = lastHello && lastHello.version;
+    if (pv && bridgeVersion !== null && (bridgeVersion === "" || older(bridgeVersion, pv))) return "Claude is still running an older bridge (" + (bridgeVersion || "1.6.1 or older") + ") than this plugin (" + pv + "). Quit Claude completely (Cmd+Q) and open it again, or some fixes won't apply.";
     if (modeEl.value === "off") return "Look only: Claude can look at this file but not change it.";
     if (modeEl.value === "ask") return "Ask first: you approve each change Claude wants to make here.";
     return lastHello && lastHello.file ? "Connected: Claude can work in “" + lastHello.file + "”. Keep this window open." : "Connected. Claude can now work in this file. Keep this window open.";
@@ -241,7 +243,8 @@
   }, 1000);
 
   function port() { return parseInt(document.getElementById("port").value, 10) || 3055; }
-  var openedAt = 0, quickDrops = 0, lastDrop = "", sockReports = 0;   // an older (1.1) bridge drops the previous file whenever another file connects
+  var openedAt = 0, quickDrops = 0, lastDrop = "", sockReports = 0, bridgeVersion = null, welcomeTimer = null;
+  function older(a, b) { a = String(a).split("."); b = String(b).split("."); for (var i = 0; i < 3; i++) { var x = +a[i] || 0, y = +b[i] || 0; if (x !== y) return x < y; } return false; }   // an older (1.1) bridge drops the previous file whenever another file connects
   function schedule(ms) { clearTimeout(retry); retry = setTimeout(connect, ms || 2000); }
   function connect() {
     clearTimeout(retry);
@@ -257,6 +260,7 @@
       var msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (!msg) return;
+      if (msg.type === "welcome") { bridgeVersion = msg.version || ""; refreshStatus(); return; }
       if (msg.type === "cancel") { toMain({ type: "cancel", rid: msg.rid, by: msg.by || "claude" }); return; }   // Claude cancelled it
       if (!msg.command) return;
       if (msg.command !== "ping") addRow(msg);   // status checks don't clutter the timeline
@@ -292,7 +296,10 @@
     if (m.type === "token-saved") { document.getElementById("tokSave").disabled = false; if (m.ok) { document.getElementById("tok").value = ""; showComments(m.removed ? "" : m.user); if (!m.removed) tokbox.classList.remove("open"); } else tokState.textContent = m.error; }
     if (m.type === "saved") { statusEl.textContent = m.ok ? "Saved a version: " + m.title : "Couldn't save a version: " + m.error; setTimeout(refreshStatus, 4000); }
     if (!FORWARD[m.type]) return;
-    if (m.type === "hello" && m.info) { lastHello = m.info; setStatus("on", connectedText()); }
+    if (m.type === "hello" && m.info) {
+      lastHello = m.info; bridgeVersion = null; setStatus("on", connectedText());
+      clearTimeout(welcomeTimer); welcomeTimer = setTimeout(function () { if (bridgeVersion === null) { bridgeVersion = ""; refreshStatus(); } }, 3000);   // bridges before 1.6.2 don't say their version
+    }
     send(m);
     if (m.type === "hello") { flush(); if (lastDrop) { sockReports++; send({ type: "problem", where: "socket", message: lastDrop }); lastDrop = ""; } }
   };

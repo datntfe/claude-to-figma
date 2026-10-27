@@ -330,6 +330,7 @@ These reads (and `get_variables`, `get_library`) answer with an `etag`. Passing 
 | `await h.link(node, target, opts?)` | Prototype link (`'back'`, a node or id; `{ transition, duration }`) |
 | `await h.component(nameOrKey, variant?)` | A component to instantiate (local name or `key:…`) |
 | `await h.shader(node, spec)` | Applies a shader, as `shader` in `update_nodes` (`null` removes them) |
+| `h.findAll(root, test)` | Like `root.findAll(test)`, but skips broken layers inside instances instead of crashing |
 | `await h.loadFonts(node)` | Loads every font a text layer (or all the text in a frame) uses, mixed fonts included |
 | `h.progress(done, total?, text?)` | Shows progress in the plugin window ("12 of 40 · Cards"). If the user presses **Cancel**, the next call throws, so the loop stops there. |
 

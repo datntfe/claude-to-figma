@@ -28,7 +28,7 @@ const pathMod = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.6.1";
+const VERSION = "1.6.2";
 const log = (...a) => { const t = a.join(" "); process.stderr.write("[figma-bridge] " + t + "\n"); fileLog("info", t); };
 
 /* ---------------- the bridge's own log ----------------
@@ -324,6 +324,7 @@ function acceptPlugin(socket, head) {
         for (const x of pending.values()) {   // calls left waiting by a socket that dropped
           if (x.orphanOf && x.orphanOf === entry.info.session) { x.plugin = entry; x.orphanOf = null; clearTimeout(x.grace); }
         }
+        entry.conn.send({ type: "welcome", version: VERSION });   // the panel warns when the bridge is older than the plugin
         log('plugin ready in "' + fileLabel(entry) + '" (' + entry.id + ", plugin " + (entry.info.version || "?") + ", window " + String(entry.info.session || "?").slice(-6) + ")");
         return;
       }

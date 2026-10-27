@@ -330,6 +330,7 @@ Các lệnh đọc này (và `get_variables`, `get_library`) trả kèm `etag`. 
 | `await h.link(node, đích, opts?)` | Link prototype (`'back'`, một node hoặc id; `{ transition, duration }`) |
 | `await h.component(tên hoặc key, variant?)` | Lấy component để tạo instance (tên local hoặc `key:…`) |
 | `await h.shader(node, spec)` | Áp shader, giống `shader` trong `update_nodes` (`null` để gỡ hết) |
+| `h.findAll(root, test)` | Giống `root.findAll(test)` nhưng bỏ qua các layer hỏng bên trong instance thay vì báo lỗi |
 | `await h.loadFonts(node)` | Load mọi font mà một text layer (hoặc toàn bộ text trong frame) dùng, kể cả font trộn |
 | `h.progress(done, total?, text?)` | Hiện tiến độ trong cửa sổ plugin ("12 of 40 · Cards"). Nếu người dùng bấm **Cancel**, lần gọi kế tiếp sẽ báo lỗi để vòng lặp dừng ở đó. |
 
