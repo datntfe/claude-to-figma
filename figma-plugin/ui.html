@@ -241,7 +241,7 @@
   }, 1000);
 
   function port() { return parseInt(document.getElementById("port").value, 10) || 3055; }
-  var openedAt = 0, quickDrops = 0;   // an older (1.1) bridge drops the previous file whenever another file connects
+  var openedAt = 0, quickDrops = 0, lastDrop = "", sockReports = 0;   // an older (1.1) bridge drops the previous file whenever another file connects
   function schedule(ms) { clearTimeout(retry); retry = setTimeout(connect, ms || 2000); }
   function connect() {
     clearTimeout(retry);
@@ -262,7 +262,9 @@
       if (msg.command !== "ping") addRow(msg);   // status checks don't clutter the timeline
       toMain({ type: "command", id: msg.id, command: msg.command, params: msg.params, deadline: msg.deadline });
     };
-    ws.onclose = function () {
+    ws.onclose = function (ev) {
+      // why the line dropped goes to the bridge's log once it is back (at most 20 times per window)
+      if (openedAt && sockReports < 20) lastDrop = "closed after " + ((Date.now() - openedAt) / 1000).toFixed(1) + "s, code " + ev.code + (ev.reason ? " (" + ev.reason + ")" : "") + (ev.wasClean ? ", clean" : "") + ", window " + document.visibilityState + (navigator.onLine === false ? ", offline" : "");
       quickDrops = openedAt && Date.now() - openedAt < 5000 ? quickDrops + 1 : 0;
       openedAt = 0;
       if (quickDrops >= 2) {
@@ -292,7 +294,7 @@
     if (!FORWARD[m.type]) return;
     if (m.type === "hello" && m.info) { lastHello = m.info; setStatus("on", connectedText()); }
     send(m);
-    if (m.type === "hello") flush();
+    if (m.type === "hello") { flush(); if (lastDrop) { sockReports++; send({ type: "problem", where: "socket", message: lastDrop }); lastDrop = ""; } }
   };
   /* a result that finishes while the connection is down is sent once it's back (after hello) */
   function send(m) {

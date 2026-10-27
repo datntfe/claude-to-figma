@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
@@ -152,7 +152,13 @@ const H = {
   component: function (ref, variant) { return resolveComponent(ref, variant); },
   shader: function (node, spec) { return applyShader(node, spec, makeCtx()); },
   /* shows progress in the Claude Bridge window; throws when the user presses Cancel there */
-  progress: function (done, total, text) { if (stopRequested()) throw new Error(STOPPED); progress(done, total, text); }
+  progress: function (done, total, text) { if (stopRequested()) throw new Error(STOPPED); progress(done, total, text); },
+  /* every font a text layer (or the text layers inside a frame) uses, mixed fonts included */
+  loadFonts: async function (node) {
+    const texts = node.type === "TEXT" ? [node] : ("findAllWithCriteria" in node ? node.findAllWithCriteria({ types: ["TEXT"] }) : []);
+    for (let i = 0; i < texts.length; i++) await loadFontsOf(texts[i]);
+    return texts.length;
+  }
 };
 
 async function getNode(id) {
@@ -2534,13 +2540,28 @@ const handlers = {
     const log = function () { logs.push(Array.prototype.map.call(arguments, safeString).join(" ")); };
     let fn;
     try { fn = new AsyncFunction("figma", "log", "h", p.code); }
-    catch (e) { throw new Error("Could not compile code: " + e.message); }
+    catch (e) {
+      // code that declares its own figma, log or h (const h = …) can't share the parameters' scope: run it one level in
+      if (!/redefinition|already been declared|redeclar/i.test(String(e.message))) throw new Error("Could not compile code: " + e.message + " (the code is the body of an async function: check brackets, commas and quotes).");
+      try { fn = new AsyncFunction("figma", "log", "h", "return (async () => {\n" + p.code + "\n})();"); }
+      catch (e2) { throw new Error("Could not compile code: " + e2.message); }
+    }
     const value = await fn(figma, log, H);
     return { value: ser(value, 4), logs: logs };
   },
   async screenshot(p) {
     const max = p.max_size || 1600;
-    if (p.node_id) return exportNode(await getNode(p.node_id), p.scale, max);
+    if (p.node_id) {
+      const n = await getNode(p.node_id);
+      if (n.type === "PAGE") {   // a page: everything on it
+        if (n !== figma.currentPage) throw new Error('"' + n.name + '" is not the page on screen: switch to it with set_page first, or screenshot a frame on it.');
+        let u = null;
+        n.children.forEach(function (c) { if (c.visible !== false) { const bb = boxOf(c); if (bb) u = unionBox(u, bb); } });
+        if (!u) throw new Error("The page is empty.");
+        return captureRegion(u, p.scale || Math.min(1, max / Math.max(u.width, u.height)), max, 'everything on the page "' + n.name + '"');
+      }
+      return exportNode(n, p.scale, max);
+    }
     const sel = figma.currentPage.selection;
     if (!p.viewport && sel.length === 1) return exportNode(sel[0], p.scale, max);
     if (!p.viewport && sel.length > 1) {
@@ -3192,6 +3213,44 @@ function toastChange(summary, touched) {
     lastToastAt = Date.now();
   } catch (e) { /* notify unavailable */ }
 }
+/* ---------- errors Claude can act on: a hint after the most common ones ---------- */
+const NET_ERR = /Unable to establish connection to Figma|Failed to fetch|network error/i;
+const HINTS = [
+  [NET_ERR, "Figma itself couldn't reach its servers (fonts and library items load from them; the bridge already tried 3 times). Nothing is wrong with the code: wait a little and run it again."],
+  [/unloaded font/i, "Load the fonts first: await h.loadFonts(node) loads every font a text layer (or the text inside a frame) uses, mixed fonts included."],
+  [/'\d+' is read-only|read-only|not extensible/i, "Figma's arrays (fills, strokes, effects, …) are frozen: copy, change, assign back, e.g. const f = JSON.parse(JSON.stringify(n.fills)); f[0].opacity = 0.5; n.fills = f."],
+  [/color\.a/, "Gradient stop colours need { r, g, b, a } (a is required); a solid paint's color is { r, g, b } with opacity on the paint."],
+  [/sublayer or table cell\) with id "I/, "Ids inside instances (I…;…) change when an instance is swapped or reset: find the layer again (find_nodes) instead of reusing an old id."],
+  [/Component set has existing errors/i, "That component set has errors in Figma (often two variants with the same name): fix it in Figma, or work on its components one by one."],
+  [/cannot read property '[^']+' of (undefined|null)/i, "Something the code looked up wasn't there (a find returned null, or the layer is of another type): check it before using it."],
+  [/This node type can't be exported/i, "Export a frame, group or layer on the page, not the page or document itself."]
+];
+function withHint(msg) {
+  for (let i = 0; i < HINTS.length; i++) if (HINTS[i][0].test(msg) && msg.indexOf("Hint: ") < 0) return msg + "\nHint: " + HINTS[i][1];
+  return msg;
+}
+/* Figma calls that fetch fonts and library items fail now and then when Figma's own connection hiccups;
+   they are safe to repeat, so they are tried up to 3 times. */
+async function netRetry(fn, self, args) {
+  for (let i = 0; ; i++) {
+    try { return await fn.apply(self, args); }
+    catch (e) { if (i >= 2 || !NET_ERR.test(String(e && e.message))) throw e; await new Promise(function (r) { setTimeout(r, 1000 * (i + 1)); }); }
+  }
+}
+function patchRetry(obj, names) {
+  names.forEach(function (k) {
+    try {
+      const orig = obj[k];
+      if (typeof orig !== "function" || orig.__retry) return;
+      const wrapped = function () { return netRetry(orig, obj, arguments); };
+      wrapped.__retry = true;
+      obj[k] = wrapped;
+    } catch (e) { /* read-only: left as it is */ }
+  });
+}
+safe(function () { patchRetry(figma, ["loadFontAsync", "listAvailableFontsAsync", "importComponentByKeyAsync", "importComponentSetByKeyAsync", "importStyleByKeyAsync"]); });
+safe(function () { patchRetry(figma.variables, ["importVariableByKeyAsync"]); });
+
 /* ---------- the panel: approvals, progress, cancel, follow ---------- */
 const STOPPED = "Stopped part way through (cancelled): what it did before stopping stays in the file (one Cmd+Z undoes it).";
 const VIEW_COMMANDS = { focus: 1, set_page: 1 };   // reads that move the user's view: what follows them is Claude's doing
@@ -3292,9 +3351,16 @@ function cancelCommand(rid, by) {
   const q = QUEUED.get(rid);
   if (q) { q.cancelled = who; progressOut(rid, { state: "cancelled" }); return "queued"; }
   const r = RUNNING.get(rid);
-  if (r) { r.cancel = who; progressOut(rid, { state: "stopping" }); return "running"; }
+  if (r) {
+    r.cancel = who;
+    progressOut(rid, { state: "stopping" });
+    // code that never checks h.progress can't be stopped from here: after 3 s the next change stops waiting for it
+    setTimeout(function () { const f = RELEASE.get(rid); if (f && RUNNING.has(rid)) { progressOut(rid, { state: "overdue" }); busyEnd(rid); f(); } }, 3000);
+    return "running";
+  }
   return null;
 }
+const RELEASE = new Map();   // command id → lets the queue go on without it
 function setMode(m, save) {
   if (m !== "allow" && m !== "ask" && m !== "off") return;
   mode = m;
@@ -3481,7 +3547,7 @@ async function runCommand(msg, write) {
     ok = true;
     figma.ui.postMessage({ type: "result", id: msg.id, ok: true, result: result });
   } catch (e) {
-    error = String(e && e.message ? e.message : e);
+    error = withHint(String(e && e.message ? e.message : e));
     figma.ui.postMessage({ type: "result", id: msg.id, ok: false, error: error });
   } finally {
     if (write) { RUNNING.delete(msg.id); if (curWrite === msg.id) curWrite = null; }
@@ -3505,7 +3571,8 @@ async function runCommand(msg, write) {
 function guarded(msg) {
   return new Promise(function (resolve) {
     let settled = false, timer = null;
-    const finish = function () { if (settled) return; settled = true; clearTimeout(timer); pendingWrites = Math.max(0, pendingWrites - 1); resolve(); };
+    const finish = function () { if (settled) return; settled = true; clearTimeout(timer); RELEASE.delete(msg.id); pendingWrites = Math.max(0, pendingWrites - 1); resolve(); };
+    RELEASE.set(msg.id, finish);
     const until = msg.deadline ? msg.deadline + 2000 : Date.now() + ASK_MAX_MS + 60000;
     timer = setTimeout(function () { progressOut(msg.id, { state: "overdue" }); busyEnd(msg.id); finish(); }, Math.max(1000, until - Date.now()));
     runCommand(msg, true).then(finish, finish);

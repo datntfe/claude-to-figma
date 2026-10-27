@@ -283,7 +283,7 @@ These reads (and `get_variables`, `get_library`) answer with an `etag`. Passing 
 | `update_nodes` | `items: [{ id \| ids, …changes }]`, `save_version`, `look` | Batch edits without code: name, text, font, size, colours, strokes, radius, effects, styles, auto layout (incl. `mode: "AUTO"` inferred from positions), sizing, variables (`'{name}'`), modes, variant, component properties, swap, prototype `link`, `shader`, any other property, remove. |
 | `audit_design` | `node_id` or `scope`, `checks`, `fix`, `grid` (default 4) | Design check: default names, values that match a variable, hard-coded colours, text without style, half pixels, off-grid spacing, WCAG contrast, small tap targets, `overflow` (text running out of its box, layers sticking out of their auto layout frame, text cut off by a clipping frame; measured from what Figma rendered, nothing is changed), hidden/empty layers, frames without auto layout. `fix: ["bind","round","autolayout"]` applies the safe fixes. |
 | `build` | `spec` (object or array), `parent_id`, `position`, `look` | Creates layers from a JSON description, including instances of local or library components, `'{variable}'` values, styles, modes, shaders and prototype links. On the page without x/y, new layers go beside your work (`position: "auto"`, default), in the middle of the screen (`"viewport"`) or at 0,0 (`"origin"`). |
-| `run_code` | `code` (string, required), `timeout_ms` (default 60000), `look` | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
+| `run_code` | `code` (string, required), `timeout_ms` (default 300000, at least 120000), `look` | Runs JavaScript in the plugin with the full Figma Plugin API. Returns `{ value, logs }`. |
 
 `look: true` on `build`, `update_nodes` and `run_code` adds a picture of the frames that changed (up to 1000 px) to the answer, so Claude checks its work without another call.
 | `set_page` | `page_id` or `name`, `create` | Switches page. With `create: true`, a missing page is created. |
@@ -330,6 +330,7 @@ These reads (and `get_variables`, `get_library`) answer with an `etag`. Passing 
 | `await h.link(node, target, opts?)` | Prototype link (`'back'`, a node or id; `{ transition, duration }`) |
 | `await h.component(nameOrKey, variant?)` | A component to instantiate (local name or `key:…`) |
 | `await h.shader(node, spec)` | Applies a shader, as `shader` in `update_nodes` (`null` removes them) |
+| `await h.loadFonts(node)` | Loads every font a text layer (or all the text in a frame) uses, mixed fonts included |
 | `h.progress(done, total?, text?)` | Shows progress in the plugin window ("12 of 40 · Cards"). If the user presses **Cancel**, the next call throws, so the loop stops there. |
 
 Return values are converted to JSON:
@@ -466,7 +467,7 @@ These notes are for people and agents writing code for the bridge. Most of them 
 - **Never call `figma.closePlugin()`.** It closes the bridge, and the user has to run the plugin again.
 - **Empty auto layout frames don't shrink.** A new frame is 100×100. If it has auto layout set to hug but **no children** (a spacer, for example), Figma keeps it at 100×100. Resize it first (`f.resize(0.01, 0.01)`) or give it a fixed size.
 - **`globalThis` persists while the plugin is open.** Store a helper library once (`globalThis.lib = { … }`) and reuse it in later calls instead of resending big code.
-- **Long jobs:** the default timeout is 60 s (`timeout_ms` raises it). Clients have their own limit too (Cowork's link to your computer gives up after about 60 s), so a call still running after about 45 s answers with a job id and Claude collects the result with `job`; don't start the work in the background yourself, because then it escapes the one-change-at-a-time queue and its undo step. In long loops call `h.progress(i, total, label)`: the user sees how far it is and can cancel.
+- **Long jobs:** `run_code` may run 5 minutes by default (`timeout_ms` raises it, never below 2 minutes). Clients have their own limit too (Cowork's link to your computer gives up after about 60 s), so a call still running after about 45 s answers with a job id and Claude collects the result with `job`; don't start the work in the background yourself, because then it escapes the one-change-at-a-time queue and its undo step. In long loops call `h.progress(i, total, label)`: the user sees how far it is and can cancel.
 
   ```js
   const cards = figma.currentPage.findAll((n) => n.name === "Card");

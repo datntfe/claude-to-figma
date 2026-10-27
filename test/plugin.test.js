@@ -272,7 +272,7 @@ const figma = {
   off(ev) { delete listeners[ev]; },
   commitUndo() { figma._commits++; },
   async saveVersionHistoryAsync(title) { figma._versions.push(title); return { id: "v" + figma._versions.length }; },
-  async loadFontAsync(f) { fonts.add(f.family + f.style); },
+  async loadFontAsync(f) { if (figma._netFail > 0) { figma._netFail--; throw new Error("Unable to establish connection to Figma after 10 seconds. Please check your internet connection."); } fonts.add(f.family + f.style); },
   async loadAllPagesAsync() { figma._allPagesLoaded = true; },
   async getNodeByIdAsync(id) { return all.get(id) || null; },
   async setCurrentPageAsync(p) { current = p; if (listeners.currentpagechange) listeners.currentpagechange(); },
@@ -364,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.0"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.1"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.0"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.1"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -1092,7 +1092,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     toUI.length = 0;
     emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("boom in handler"); } } }]);
     const pb = toUI.find((m) => m.type === "problem");
-    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.0", JSON.stringify(pb));
+    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.1", JSON.stringify(pb));
     for (let i = 0; i < 8; i++) emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("again"); } } }]);
     assert.ok(toUI.filter((m) => m.type === "problem").length <= 5, "at most 5 a minute");
     console.log("problems reported OK");
@@ -1156,6 +1156,40 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     delete figma.fileKey;
     ok(await cmd("delete_nodes", { ids: [pinned.id, other.id] }));
     console.log("comments (token check, threads, layers, scope, resolved, fallback) OK");
+
+    // 1.6.1: fixes for the errors in the bridge's log
+    assert.equal(ok(await cmd("run_code", { code: "const h = 2; let log = 3; return h + log" })).value, 5, "code may declare its own h, log or figma");
+    r = await cmd("run_code", { code: "return [1, 2" });
+    assert.ok(!r.ok && /Could not compile code: .*body of an async function/.test(r.error), r.error);
+    r = await cmd("run_code", { code: "throw new Error(\"in set_fills: '0' is read-only\")" });
+    assert.ok(!r.ok && /\nHint: Figma's arrays .* are frozen/.test(r.error), r.error);
+    figma._netFail = 2;
+    const tNet = Date.now();
+    assert.equal(ok(await cmd("run_code", { code: "await figma.loadFontAsync({ family: 'Inter', style: 'Black' }); return 'loaded'" })).value, "loaded", "Figma's network hiccups are retried");
+    assert.ok(figma._netFail === 0 && Date.now() - tNet >= 2500);
+    const tx = figma.createText(); tx.fontName = { family: "Lora", style: "Italic" }; tx._chars = "x";
+    const fr = figma.createFrame(); fr.appendChild(tx);
+    assert.equal(ok(await cmd("run_code", { code: "return await h.loadFonts(await figma.getNodeByIdAsync('" + fr.id + "'))" })).value, 1);
+    assert.ok(fonts.has("LoraItalic"));
+    const pageShot = ok(await cmd("screenshot", { node_id: current.id }));
+    assert.ok(pageShot.base64 && /everything on the page/.test(pageShot.name), JSON.stringify(Object.keys(pageShot)) + pageShot.name);
+    const madePage = !doc.children.find((pg) => pg !== current);
+    const otherPage = doc.children.find((pg) => pg !== current) || figma.createPage();
+    r = await cmd("screenshot", { node_id: otherPage.id });
+    assert.ok(!r.ok && /set_page first/.test(r.error), r.error);
+    if (madePage) otherPage.remove();
+    // Cancel on code that never checks h.progress: the next change goes ahead after 3 s
+    toUI.length = 0;
+    sandbox.__gate = new Promise(() => { });
+    uiHandler({ type: "command", id: "k1", command: "run_code", params: { code: "await globalThis.__gate" } });
+    const pk2 = uiHandler({ type: "command", id: "k2", command: "update_nodes", params: { items: [{ id: fr.id, name: "After cancel" }] } });
+    await new Promise((res) => setTimeout(res, 20));
+    const tc = Date.now();
+    await uiHandler({ type: "cancel", rid: "k1" });
+    await pk2;
+    assert.ok(fr.name === "After cancel" && Date.now() - tc >= 2900 && Date.now() - tc < 4500, "released after " + (Date.now() - tc));
+    ok(await cmd("delete_nodes", { ids: [fr.id] }));
+    console.log("1.6.1 fixes (own h/log, compile hint, error hints, network retry, h.loadFonts, page screenshot, cancel release) OK");
   }
 
   /* 1.4: new work lands beside the user's work, overlapping nothing */
@@ -1277,7 +1311,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.6.0");
+  assert.equal(sandbox.__claudeBridge.version, "1.6.1");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });

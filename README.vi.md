@@ -283,7 +283,7 @@ Các lệnh đọc này (và `get_variables`, `get_library`) trả kèm `etag`. 
 | `update_nodes` | `items: [{ id \| ids, …thay đổi }]`, `save_version`, `look` | Sửa hàng loạt không cần code: tên, text, font, cỡ chữ, màu, stroke, bo góc, effect, style, auto layout (cả `mode: "AUTO"` tự suy ra từ vị trí hiện tại), sizing, variable (`'{tên}'`), mode, variant, property của component, swap, `link` prototype, `shader`, thuộc tính bất kỳ, xoá. |
 | `audit_design` | `node_id` hoặc `scope`, `checks`, `fix`, `grid` (mặc định 4) | Soát thiết kế: tên mặc định, giá trị trùng variable, màu hard-code, text không có style, lệch pixel, spacing lệch grid, tương phản WCAG, vùng bấm nhỏ, `overflow` (chữ tràn khỏi khung, layer lòi ra ngoài frame auto layout, chữ bị frame cắt mất; đo từ những gì Figma đã vẽ, không sửa gì), layer ẩn/rỗng, frame chưa dùng auto layout. `fix: ["bind","round","autolayout"]` để tự sửa phần an toàn. |
 | `build` | `spec` (object hoặc mảng), `parent_id`, `position`, `look` | Tạo layer từ mô tả JSON, kể cả instance của component local hay library, giá trị `'{variable}'`, style, mode, shader và link prototype. Đặt trên page mà không có x/y thì layer mới nằm cạnh chỗ bạn làm (`position: "auto"`, mặc định), giữa màn hình (`"viewport"`) hoặc ở 0,0 (`"origin"`). |
-| `run_code` | `code` (chuỗi, bắt buộc), `timeout_ms` (mặc định 60000), `look` | Chạy JavaScript trong plugin với toàn bộ Figma Plugin API. Trả về `{ value, logs }`. |
+| `run_code` | `code` (chuỗi, bắt buộc), `timeout_ms` (mặc định 300000, tối thiểu 120000), `look` | Chạy JavaScript trong plugin với toàn bộ Figma Plugin API. Trả về `{ value, logs }`. |
 
 `look: true` trên `build`, `update_nodes` và `run_code` trả kèm ảnh các frame vừa đổi (tối đa 1000 px), Claude tự kiểm tra mà không cần gọi thêm lệnh.
 | `set_page` | `page_id` hoặc `name`, `create` | Chuyển page. Có `create: true` thì tạo page nếu chưa có. |
@@ -330,6 +330,7 @@ Các lệnh đọc này (và `get_variables`, `get_library`) trả kèm `etag`. 
 | `await h.link(node, đích, opts?)` | Link prototype (`'back'`, một node hoặc id; `{ transition, duration }`) |
 | `await h.component(tên hoặc key, variant?)` | Lấy component để tạo instance (tên local hoặc `key:…`) |
 | `await h.shader(node, spec)` | Áp shader, giống `shader` trong `update_nodes` (`null` để gỡ hết) |
+| `await h.loadFonts(node)` | Load mọi font mà một text layer (hoặc toàn bộ text trong frame) dùng, kể cả font trộn |
 | `h.progress(done, total?, text?)` | Hiện tiến độ trong cửa sổ plugin ("12 of 40 · Cards"). Nếu người dùng bấm **Cancel**, lần gọi kế tiếp sẽ báo lỗi để vòng lặp dừng ở đó. |
 
 Giá trị trả về được đổi sang JSON:
@@ -466,7 +467,7 @@ Phần này dành cho người và agent viết code cho bridge. Phần lớn l�
 - **Không bao giờ gọi `figma.closePlugin()`.** Lệnh này đóng luôn bridge, người dùng phải chạy lại plugin.
 - **Frame auto layout rỗng không tự co lại.** Frame mới tạo có kích thước 100×100. Nếu frame để auto layout kiểu hug mà **không có layer con** (ví dụ frame spacer), Figma giữ nguyên 100×100. Hãy resize trước (`f.resize(0.01, 0.01)`) hoặc đặt kích thước cố định.
 - **`globalThis` được giữ lại khi plugin còn mở.** Lưu thư viện helper một lần (`globalThis.lib = { … }`) rồi dùng lại ở các lần gọi sau, khỏi gửi lại đoạn code lớn.
-- **Việc chạy lâu:** timeout mặc định là 60 giây (tăng bằng `timeout_ms`). Client cũng có giới hạn riêng (kết nối từ Cowork tới máy bạn ngắt sau khoảng 60 giây), nên lệnh chạy quá khoảng 45 giây sẽ trả về mã job và Claude lấy kết quả bằng `job`. Đừng tự cho chạy nền, vì như vậy việc đó thoát khỏi hàng đợi từng-thay-đổi-một và mất bước undo riêng. Trong vòng lặp dài, gọi `h.progress(i, total, nhãn)`: người dùng thấy đã tới đâu và có thể huỷ.
+- **Việc chạy lâu:** `run_code` được chạy tối đa 5 phút theo mặc định (tăng bằng `timeout_ms`, không dưới 2 phút). Client cũng có giới hạn riêng (kết nối từ Cowork tới máy bạn ngắt sau khoảng 60 giây), nên lệnh chạy quá khoảng 45 giây sẽ trả về mã job và Claude lấy kết quả bằng `job`. Đừng tự cho chạy nền, vì như vậy việc đó thoát khỏi hàng đợi từng-thay-đổi-một và mất bước undo riêng. Trong vòng lặp dài, gọi `h.progress(i, total, nhãn)`: người dùng thấy đã tới đâu và có thể huỷ.
 
   ```js
   const cards = figma.currentPage.findAll((n) => n.name === "Card");

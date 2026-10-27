@@ -28,7 +28,7 @@ const pathMod = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 const log = (...a) => { const t = a.join(" "); process.stderr.write("[figma-bridge] " + t + "\n"); fileLog("info", t); };
 
 /* ---------------- the bridge's own log ----------------
@@ -324,7 +324,7 @@ function acceptPlugin(socket, head) {
         for (const x of pending.values()) {   // calls left waiting by a socket that dropped
           if (x.orphanOf && x.orphanOf === entry.info.session) { x.plugin = entry; x.orphanOf = null; clearTimeout(x.grace); }
         }
-        log('plugin ready in "' + fileLabel(entry) + '" (' + entry.id + ")");
+        log('plugin ready in "' + fileLabel(entry) + '" (' + entry.id + ", plugin " + (entry.info.version || "?") + ", window " + String(entry.info.session || "?").slice(-6) + ")");
         return;
       }
       if (msg.type === "info") { Object.assign(entry.info, msg.info || {}); return; }
@@ -348,13 +348,16 @@ function acceptPlugin(socket, head) {
       if (lt && entry.ready && lt.key === identity(entry)) {
         late.delete(msg.id);
         noteFor(lt.key, "The " + lt.command + " that timed out " + ago(Date.now() - lt.at) + " ago finished later in Figma: " + (msg.ok ? "it was applied." : "it failed (" + clipStr(msg.error || "error", 160) + ")."));
+        fileLog("info", lt.command + " that timed out finished " + ago(Date.now() - lt.at) + " after it was sent: " + (msg.ok ? "applied" : "failed: " + clipStr(msg.error || "", 200)));
       }
     },
     onClose: () => {
       if (plugins.get(entry.id) !== entry) return;
       plugins.delete(entry.id);
       if (entry.ready) { lastPluginAt = Date.now(); closedFiles.set(fileLabel(entry), Date.now()); }
-      log('plugin disconnected from "' + fileLabel(entry) + '"' + (entry.conn.closedCleanly ? "" : " (dropped)"));
+      let inFlight = 0;
+      for (const x of pending.values()) if (x.plugin === entry) inFlight++;
+      log('plugin disconnected from "' + fileLabel(entry) + '"' + (entry.conn.closedCleanly ? "" : " (dropped)") + " after " + ago(Date.now() - entry.connectedAt) + (inFlight ? ", " + inFlight + " call(s) waiting" : ""));
       const why = 'The Figma plugin in "' + fileLabel(entry) + '" disconnected.';
       if (entry.conn.closedCleanly || !entry.ready || !entry.info.session) { failFor(entry, why); return; }
       /* a dropped socket usually comes back within seconds: its calls wait for it a little */
@@ -627,12 +630,15 @@ const RUN_CODE_HELP = [
   "Runs JavaScript with the Figma Plugin API in the user's open file and returns the result. The code is the BODY of an async function with:",
   "  figma — the API (dynamic-page: use the *Async calls, e.g. await figma.getNodeByIdAsync(id), await page.loadAsync(), node.getMainComponentAsync(), node.setFillStyleIdAsync()).",
   "  log(...args) — debug output, returned as logs.",
-  "  h — helpers: h.solid('#RRGGBB', opacity?) → paints, h.hex(), h.color('#RRGGBBAA'), h.toHex(color), await h.font(family, style), h.svg(markup, width?) → node, h.summary(node, depth?), await h.describe(node), await h.variable('color/brand') → Variable (local or library), await h.bind(node, 'fill', 'color/brand'), await h.shader(node, {name, properties}), h.progress(done, total, text) in long loops (the user sees it and can cancel: it throws then).",
+  "  h — helpers: h.solid('#RRGGBB', opacity?) → paints, h.hex(), h.color('#RRGGBBAA'), h.toHex(color), await h.font(family, style), h.svg(markup, width?) → node, h.summary(node, depth?), await h.describe(node), await h.variable('color/brand') → Variable (local or library), await h.bind(node, 'fill', 'color/brand'), await h.shader(node, {name, properties}), h.progress(done, total, text) in long loops (the user sees it and can cancel: it throws then), await h.loadFonts(node) before editing text.",
   "`return value` sends data back (nodes as {id,name,type,…}). Load fonts before setting text. globalThis persists while the plugin is open.",
   "Each call is one Cmd+Z; before risky edits: await figma.saveVersionHistoryAsync('Before …'). Never call figma.closePlugin(). Check drawings with screenshot."
 ].join("\n");
 
 const FILE_PROP = { type: "string", description: "Figma file name or link (needed for changes when several are open)." };
+/* run_code may run at least this long: past 45 s a call is a job anyway, and a short timeout only turned slow
+   but working code into "may still have been applied" (the most common error in the logs) */
+const MIN_RUN_MS = Math.max(0, parseInt(process.env.FIGMA_BRIDGE_MIN_TIMEOUT_MS || "120000", 10) || 0);
 const FIGMA_API = process.env.FIGMA_BRIDGE_API || "https://api.figma.com/v1";
 const SINCE_PROP = { type: "string", description: "An earlier etag: returns {unchanged: true} if nothing changed." };
 const LOOK_PROP = { type: "boolean", description: "Also return a picture of the result." };
@@ -822,10 +828,10 @@ const TOOLS = [
       type: "object",
       properties: {
         code: { type: "string", description: "Body of an async JS function. Use `return` to send back a value." },
-        timeout_ms: { type: "number", description: "Max time to wait, default 60000." }, look: LOOK_PROP },
+        timeout_ms: { type: "number", description: "Default 300000, at least 120000 (after 45 s it becomes a job)." }, look: LOOK_PROP },
       required: ["code"], additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("run_code", { code: a.code, look: a.look }, a.timeout_ms || 60000, a.file, true), "run_code")
+    run: async (a) => reply(await callPlugin("run_code", { code: a.code, look: a.look }, Math.max(MIN_RUN_MS, Number(a.timeout_ms) || 300000), a.file, true), "run_code")
   },
   {
     name: "build",
@@ -849,7 +855,7 @@ const TOOLS = [
         position: { type: "string", enum: ["auto", "viewport", "origin"], description: "Where new top-level layers go without x/y: auto (default) right of the selection or the frame on screen, overlapping nothing; viewport = middle of the screen; origin = 0,0." }, look: LOOK_PROP },
       required: ["spec"], additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("build", { spec: a.spec, parent_id: a.parent_id, position: a.position, look: a.look }, 120000, a.file, true), "build")
+    run: async (a) => reply(await callPlugin("build", { spec: a.spec, parent_id: a.parent_id, position: a.position, look: a.look }, 300000, a.file, true), "build")
   },
   {
     name: "delete_nodes",
@@ -905,7 +911,7 @@ const TOOLS = [
         save_version: { type: "string" }, look: LOOK_PROP },
       required: ["items"], additionalProperties: false
     },
-    run: async (a) => reply(await callPlugin("update_nodes", { items: a.items, save_version: a.save_version, look: a.look }, 180000, a.file, true), "update_nodes")
+    run: async (a) => reply(await callPlugin("update_nodes", { items: a.items, save_version: a.save_version, look: a.look }, 300000, a.file, true), "update_nodes")
   },
   {
     name: "audit_design",

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.6.1
+
+Fixes for what the bridge's own log showed over three days of real work (1,683 lines: 942 `run_code`, 99 errors, 38 dropped plugin connections).
+
+- **`run_code` gets time to finish.** Most errors (about 45) were `run_code` calls given 60–120 s that were still working: they ended as "may still have been applied" while Figma carried on. A call past 45 s is a job anyway, so `run_code` now runs up to 5 minutes by default and never less than 2 (`timeout_ms` raises it; `FIGMA_BRIDGE_MIN_TIMEOUT_MS`). `build` and `update_nodes` get 5 minutes too.
+- **Code may declare its own `h`, `log` or `figma`.** "invalid redefinition of parameter name" (10 times) is gone: such code runs one level in. Syntax errors say the code is the body of an async function.
+- **Figma's own network hiccups are retried.** "Unable to establish connection to Figma after 10 seconds" (11 times, in bursts) comes from Figma loading fonts and library items; `loadFontAsync`, `listAvailableFontsAsync`, the library imports and `importVariableByKeyAsync` are now tried up to 3 times.
+- **Hints with common errors:** unloaded fonts (and the new `await h.loadFonts(node)`, which loads every font of a text layer or of all text in a frame), frozen `fills`/`effects` arrays, gradient colours without `a`, old ids inside instances, component sets with errors, missing layers.
+- `screenshot` of a page captures everything on it (it failed with "This node type can't be exported: PAGE").
+- **Cancel** on code that never calls `h.progress` lets the next change go ahead after 3 seconds instead of waiting for Claude's timeout.
+- More in the log: why the plugin's connection dropped (close code, how long it lasted, whether the window was hidden), the plugin version and window of each connection, calls waiting when it dropped, and changes that finished after Claude stopped waiting.
+
 ## 1.6.0
 
 - **Claude can read the file's comments.** New tool `get_comments`: open threads, newest first, with the comment number, author, time, text, the layer each one is pinned to (id, name, page, path) or its point on the canvas, replies and reactions. `node_id` keeps the comments on one layer and what's inside it, `resolved: true` adds resolved threads, and `since` works as on other reads.

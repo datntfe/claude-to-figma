@@ -1,6 +1,6 @@
 {
   "name": "claude-to-figma",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "private": true,
   "description": "Let Claude see what you are working on in Figma and design, edit, tidy, manage variables, styles and libraries, read designs for code, and screenshot directly in your open files: a zero-dependency MCP server plus a Figma development plugin, connected over localhost.",
   "keywords": ["claude", "figma", "mcp", "model-context-protocol", "figma-plugin"],
