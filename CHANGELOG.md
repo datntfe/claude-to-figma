@@ -1,5 +1,9 @@
 # Changelog
 
+## Installer fix (after 1.6.2)
+
+- Claude started the bridge with the exact node it found at install time (for example `~/.local/bin/node`). When that node moved or was removed, the bridge silently stopped starting and the plugin stayed red ("Not connected"). Claude now starts `server/start.sh`, which finds Node.js each time (Homebrew, `/usr/local`, `~/.local/bin`, nvm, volta, mise, asdf, or a login shell). Run `./install-mac.sh` once to switch an existing setup over; it also finds Node.js when it isn't on the PATH.
+
 ## 1.6.2
 
 The log after 1.6.1 showed the same `run_code` timeouts. Claude hadn't been restarted, so the bridge was still 1.6.0, and some `run_code` calls never finished because they waited on something in Figma.

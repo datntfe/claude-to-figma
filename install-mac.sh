@@ -6,6 +6,11 @@ set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/claude-figma-bridge"
 NODE="$(command -v node || true)"
+if [ -z "$NODE" ]; then   # not on PATH: look where Node.js usually lives
+  for n in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.local/bin/node" "$HOME/.volta/bin/node" $(ls -d "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null) "$HOME/.local/share/mise/shims/node" "$HOME/.asdf/shims/node"; do
+    if [ -x "$n" ] && [ ! -d "$n" ]; then NODE="$n"; break; fi
+  done
+fi
 if [ -z "$NODE" ]; then
   echo "Node.js not found. Install the LTS version from https://nodejs.org and run this again."
   exit 1
@@ -19,6 +24,7 @@ if [ "$SRC" != "$DEST" ]; then
   cp "$SRC/install-mac.sh" "$DEST/" 2>/dev/null || true
   for f in README.md README.vi.md HUONG-DAN.md CHANGELOG.md package.json; do [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DEST/"; done
 fi
+chmod +x "$DEST/server/start.sh" 2>/dev/null || true
 echo "Bridge copied to: $DEST"
 
 CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
@@ -37,11 +43,12 @@ if (fs.existsSync(cfg)) {
   }
 }
 j.mcpServers = j.mcpServers || {};
-j.mcpServers["figma-bridge"] = { command: node, args: [server] };
+// start.sh finds Node.js each time Claude starts: an upgraded or moved node can not break the bridge
+j.mcpServers["figma-bridge"] = { command: "/bin/bash", args: [server] };
 fs.writeFileSync(cfg, JSON.stringify(j, null, 2) + "\n");
 console.log("Added \"figma-bridge\" to " + cfg);
 console.log("MCP servers now configured: " + Object.keys(j.mcpServers).join(", "));
-' "$CFG" "$NODE" "$DEST/server/index.js"
+' "$CFG" "$NODE" "$DEST/server/start.sh"
 
 echo ""
 echo "Done. Two steps left:"

@@ -533,6 +533,7 @@ figma-plugin/code.js   (plugin main thread: runs commands with the Figma Plugin 
 
 | Symptom | Fix |
 |---|---|
+| Plugin dot stays **red**, and Claude → Settings → Developer shows *"No executable file at …/node"* | The Node.js Claude was set up with moved or was removed. Run `~/claude-figma-bridge/install-mac.sh` again (it points Claude at `server/start.sh`, which finds Node.js each time), then quit Claude (Cmd+Q) and open it again. |
 | Plugin dot stays **red**, "Not connected" | The server isn't running. Make sure Claude is open and was **fully restarted** (Cmd+Q) after setup. Open <http://localhost:3055> to check. If the page doesn't load, the MCP config is wrong. Check the paths, and on Windows the `\\` escaping. |
 | <http://localhost:3055> works but the dot is red | Is the port in the plugin's **Port** field 3055 (or your custom port), and does `manifest.json` allow it? Press **Reconnect**. |
 | Claude says "The Figma plugin is not connected" | Run **Plugins → Development → Claude Bridge** in the file you want, and keep its window open. |

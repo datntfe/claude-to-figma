@@ -533,6 +533,7 @@ figma-plugin/code.js   (luồng chính của plugin: chạy lệnh bằng Figma 
 
 | Hiện tượng | Cách xử lý |
 |---|---|
+| Chấm plugin vẫn **đỏ**, và Claude → Settings → Developer báo *"No executable file at …/node"* | Node.js lúc cài đã bị dời hoặc xoá. Chạy lại `~/claude-figma-bridge/install-mac.sh` (nó cho Claude chạy `server/start.sh`, tự tìm Node.js mỗi lần), rồi thoát hẳn Claude (Cmd+Q) và mở lại. |
 | Chấm plugin vẫn **đỏ**, "Not connected" | Server chưa chạy. Đảm bảo Claude đang mở và đã **thoát hẳn rồi mở lại** (Cmd+Q) sau khi cài. Mở <http://localhost:3055> để kiểm tra. Nếu trang không lên thì cấu hình MCP sai: kiểm tra đường dẫn, và trên Windows kiểm tra dấu `\\`. |
 | <http://localhost:3055> chạy nhưng chấm vẫn đỏ | Ô **Port** trong plugin có đúng 3055 (hoặc cổng bạn đã đổi) không, và `manifest.json` có cho phép cổng đó không? Bấm **Reconnect**. |
 | Claude báo "The Figma plugin is not connected" | Chạy **Plugins → Development → Claude Bridge** trong đúng file cần làm và để cửa sổ plugin mở. |
