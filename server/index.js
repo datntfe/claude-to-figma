@@ -28,7 +28,7 @@ const pathMod = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 
 const PORT = parseInt(process.env.FIGMA_BRIDGE_PORT || "3055", 10);
-const VERSION = "1.6.4";
+const VERSION = "1.6.3";
 const log = (...a) => { const t = a.join(" "); process.stderr.write("[figma-bridge] " + t + "\n"); fileLog("info", t); };
 
 /* ---------------- the bridge's own log ----------------
@@ -165,13 +165,7 @@ let seq = 0;
 const late = new Map();       // command id -> { command, at, key }
 const lateNotes = new Map();  // file identity -> [notes]
 const recentDrops = new Map();// file identity -> { at, label }: a file whose plugin dropped without closing (reconnecting)
-const STUCK_CODE = " Figma stopped answering while the code ran: a synchronous loop over many layers blocks it (awaits don't). Split the work into smaller run_code calls, look at one frame instead of the whole page, and call h.progress(i, n) inside loops (the Cancel button works then).";
-/* A change Figma is still working on (the plugin says so every few seconds) isn't timed out: Claude waits
-   for its real result, up to MAX_RUN_MS. Only a plugin that stops answering for ALIVE_MS times out. */
-const MAX_RUN_MS = Math.max(1000, parseInt(process.env.FIGMA_BRIDGE_MAX_RUN_MS || "900000", 10) || 900000);
-const ALIVE_MS = Math.max(100, parseInt(process.env.FIGMA_BRIDGE_ALIVE_MS || "20000", 10) || 20000);
-function stillAlive(alive, at, timeout) { const now = Date.now(); return !!alive && now - alive < ALIVE_MS && now - at < Math.max(timeout, MAX_RUN_MS); }
-function mins(ms) { return ms >= 90000 ? Math.round(ms / 60000) + " min" : Math.round(ms / 1000) + "s"; }
+const STUCK_CODE = " The code was probably stuck (a very long loop, or waiting on something that never finishes): split the work into smaller run_code calls, look at one frame instead of the whole page, and call h.progress(i, n) inside loops (the Cancel button works then).";
 const MAYBE_APPLIED = " If this was a change, it may still have been applied in Figma: check with get_context (recent activity) or a screenshot before trying again, so nothing is done twice.";
 /* Long calls: MCP clients give up on a call after about a minute (Cowork sooner) and a retried change
    would then run twice. A call still running after SOFT_MS answers with a job id instead (see `job`). */
@@ -271,23 +265,16 @@ function hubCallPlugin(command, params, timeout, target, write, opts) {
       resolve: (v) => { clearTimeout(timer); clearTimeout(entry.grace); const q = entry.plugin; resolve({ result: v, file: fileLabel(q), files: distinctFiles(livePlugins()), notes: takeNotes(identity(q)) }); },
       reject: (e) => { clearTimeout(timer); clearTimeout(entry.grace); reject(e); }
     };
-    const expire = () => {
+    const timer = setTimeout(() => {
       if (pending.get(id) !== entry) return;
-      if (write && stillAlive(entry.alive, at, timeout)) {   // still working in Figma: wait for the real result
-        if (!entry.extended) { entry.extended = true; log(command + " still running in Figma after " + mins(Date.now() - at) + ": waiting for it (up to " + mins(Math.max(timeout, MAX_RUN_MS)) + ")"); }
-        timer = setTimeout(expire, Math.min(5000, ALIVE_MS));
-        return;
-      }
       pending.delete(id);
       clearTimeout(entry.grace);
       if (write) { late.set(id, { command: command, at: at, key: identity(entry.plugin) }); setTimeout(() => late.delete(id), 30 * 60000); }
-      const capped = write && entry.alive && Date.now() - entry.alive < ALIVE_MS;
-      reject(new Error((capped ? "Still running in Figma after " + mins(Date.now() - at) + " (the most one change may take), so Claude stopped waiting (" + command + ")." : "Timed out after " + mins(Date.now() - at) + " waiting for Figma (" + command + ").") + (write ? MAYBE_APPLIED : "") + (command === "run_code" ? (capped ? " Split the work into smaller run_code calls." : STUCK_CODE) : "")));
-    };
-    let timer = setTimeout(expire, timeout);
+      reject(new Error("Timed out after " + Math.round(timeout / 1000) + "s waiting for Figma (" + command + ")." + (write ? MAYBE_APPLIED : "") + (command === "run_code" ? STUCK_CODE : "")));
+    }, timeout);
     pending.set(id, entry);
     const msg = { id: id, command: command, params: params || {} };
-    if (write) { msg.deadline = at + timeout - 500; msg.until = at + Math.max(timeout, MAX_RUN_MS); }   // a change still queued in Figma when Claude stops waiting is dropped; one running may go on until `until`
+    if (write) msg.deadline = at + timeout - 500;   // a change still queued in Figma when Claude stops waiting is dropped
     if (opts.by) msg.by = opts.by;
     if (opts.onSent) opts.onSent(id);
     p.conn.send(msg);
@@ -347,7 +334,7 @@ function acceptPlugin(socket, head) {
       if (msg.type === "problem") { fileLog("plugin", '"' + fileLabel(entry) + '" ' + clipStr(msg.where || "?", 40) + ": " + clipStr(msg.message || "", 600)); return; }
       if (msg.type === "progress") {   // queued / asking / running 12 of 40 (by rid: a 1.4 hub ignores messages without id)
         const pd = pending.get(msg.rid);
-        if (pd && pd.plugin === entry) { if (msg.state === "running") pd.alive = Date.now(); if (pd.onProgress) pd.onProgress(msg); }
+        if (pd && pd.plugin === entry && pd.onProgress) pd.onProgress(msg);
         return;
       }
       if (msg.id === undefined) return;
@@ -490,7 +477,7 @@ function connectRelay() {
       const link = makeConn(socket, {
         head: head, mask: true,
         onMessage: (m) => {
-          if (m.type === "progress") { const p = pending.get(m.id); if (p && m.state === "running") p.alive = Date.now(); if (p && p.onProgress) p.onProgress(m); return; }
+          if (m.type === "progress") { const p = pending.get(m.id); if (p && p.onProgress) p.onProgress(m); return; }
           if (m.type !== "reply" || !pending.has(m.id)) return;
           const p = pending.get(m.id); pending.delete(m.id);
           if (m.ok) p.resolve(m); else p.reject(new Error(m.error || "Figma reported an error."));
@@ -514,13 +501,7 @@ function relayCall(type, command, params, timeout, target, write, opts) {
     const id = ++seq, link = hubLink;
     // the hub times the call out itself (and gives a change in Ask first mode longer); this is only a safety net
     const wait = (write ? Math.max(timeout, ASK_MS) : timeout) + 2000;
-    const at = Date.now();
-    const expire = () => {
-      const p = pending.get(id);
-      if (p && write && stillAlive(p.alive, at, wait)) { timer = setTimeout(expire, Math.min(5000, ALIVE_MS)); return; }   // the hub decides; this is a safety net
-      pending.delete(id); reject(new Error("Timed out after " + mins(Date.now() - at) + " waiting for Figma (" + (command || type) + ")." + (write ? MAYBE_APPLIED : "")));
-    };
-    let timer = setTimeout(expire, wait);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error("Timed out after " + Math.round(wait / 1000) + "s waiting for Figma (" + (command || type) + ")." + (write ? MAYBE_APPLIED : ""))); }, wait);
     pending.set(id, { write: !!write, onProgress: opts.onProgress, resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
     link.send({ type: type, id: id, command: command, params: params || {}, timeout: timeout, target: target, write: write || undefined, by: opts.by });
     if (opts.onSent) opts.onSent(id, link);
@@ -574,10 +555,7 @@ async function callPluginOnce(command, params, timeoutMs, target, write) {
   /* the tool call this belongs to (see callTool): it can cancel what it sent and shows progress */
   const cx = callCtx.getStore();
   const opts = { by: BY };
-  if (cx) opts.onProgress = (pm) => {   // a heartbeat ("running", nothing else) keeps what the last report said
-    const prev = cx.progress || {}, has = (v) => v !== undefined && v !== null;
-    cx.progress = { state: pm.state || prev.state, done: has(pm.done) ? pm.done : prev.done, total: has(pm.total) ? pm.total : prev.total, text: has(pm.text) ? pm.text : prev.text };
-  };
+  if (cx) opts.onProgress = (pm) => { cx.progress = { state: pm.state, done: pm.done, total: pm.total, text: pm.text }; };
   try {
     if (role === "hub") return await hubCall(command, params, timeout, target, write, Object.assign({ onSent: cx ? (id) => cx.sent.push({ hub: id }) : null }, opts));
     if (role === "relay") {

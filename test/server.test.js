@@ -7,7 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const PORT = Number(process.env.TEST_PORT || 3999);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-home-"));
-const srv = spawn(process.execPath, [path.join(__dirname, "..", "server", "index.js")], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_HELLO_MS: "400", FIGMA_BRIDGE_LOG: path.join(HOME, "bridge.log"), FIGMA_BRIDGE_PLUGIN_WAIT_MS: "1500", FIGMA_BRIDGE_MIN_TIMEOUT_MS: "100", FIGMA_BRIDGE_ALIVE_MS: "400", FIGMA_BRIDGE_MAX_RUN_MS: "2500" }) });
+const srv = spawn(process.execPath, [path.join(__dirname, "..", "server", "index.js")], { env: Object.assign({}, process.env, { FIGMA_BRIDGE_PORT: String(PORT), HOME: HOME, FIGMA_BRIDGE_HELLO_MS: "400", FIGMA_BRIDGE_LOG: path.join(HOME, "bridge.log"), FIGMA_BRIDGE_PLUGIN_WAIT_MS: "1500", FIGMA_BRIDGE_MIN_TIMEOUT_MS: "100" }) });
 let out = "", stderr = "";
 const waiters = new Map();
 srv.stdout.on("data", (d) => {
@@ -86,7 +86,7 @@ function rawPlugin(info, onCommand) {
   await sleep(400);
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
   assert.equal(init.result.protocolVersion, "2025-06-18");
-  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.6.4");
+  assert.equal(init.result.serverInfo.name, "figma-bridge"); assert.equal(init.result.serverInfo.version, "1.6.3");
   assert.ok(init.result.capabilities.prompts && /get_context/.test(init.result.instructions));
   srv.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
@@ -134,23 +134,12 @@ function rawPlugin(info, onCommand) {
 
   /* one file */
   const big = Buffer.alloc(3 * 1024 * 1024, 7).toString("base64"); // ~4 MB string
-  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.6.4", session: "sA" };
+  const infoA = { file: "Product", fileKey: "AbCdEf123456", page: "Page 1", editorType: "figma", version: "1.6.3", session: "sA" };
   let heldId = null, slowId = null, aPaused = false;
-  const handlerA = (m, p) => {
+  const handlerA = (m) => {
     if (m.command === "ping") return Object.assign(ping(infoA), aPaused ? { paused: true } : {});
     if (m.command === "get_tree" && m.params.node_id === "hold") { heldId = m.id; return undefined; }
     if (m.command === "run_code" && m.params.code === "slow") { slowId = m.id; return undefined; }
-    if (m.command === "run_code" && /^beat/.test(m.params.code)) {   // still working in Figma: heartbeats every 100 ms
-      const [, kind, ms] = m.params.code.split(":"), t0 = Date.now();
-      const iv = setInterval(() => {
-        const el = Date.now() - t0;
-        if (kind === "stop" && el > Number(ms)) return clearInterval(iv);   // goes silent, never answers
-        if (kind === "answer" && el > Number(ms)) { clearInterval(iv); return p.send({ type: "result", id: m.id, ok: true, result: { value: "finished after " + ms } }); }
-        if (kind === "forever" && el > 6000) return clearInterval(iv);
-        p.send({ type: "progress", rid: m.id, state: "running" });
-      }, 100);
-      return undefined;
-    }
     if (m.command === "find_nodes" && m.params.name === "huge") return { count: 20000, nodes: Array.from({ length: 20000 }, (_, i) => ({ id: "1:" + i, name: "Layer with a fairly long name " + i, type: "RECTANGLE", path: "Screen › Section › Card" })) };
     if (m.command === "export_nodes" && m.params.format === "PDF") return { format: "PDF", files: [{ id: "../../../evil", name: "..", base64: Buffer.from("%PDF").toString("base64"), bytes: 4 }] };
     if (m.command === "run_code") return m.params.code.includes("throw") ? new Error("boom") : { value: { len: m.params.code.length, by: "A" }, logs: ["hi"] };
@@ -164,7 +153,7 @@ function rawPlugin(info, onCommand) {
   r = await tool("status");
   const st = JSON.parse(txt(r));
   console.log("status:", txt(r).replace(/\s+/g, " "));
-  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.6.4"); assert.ok(!st.notes && !st.files);
+  assert.equal(st.file, "Product"); assert.equal(st.plugin_version, "1.6.3"); assert.ok(!st.notes && !st.files);
 
   const longCode = "// " + "x".repeat(300000) + "\nreturn 1";   // > 64 KB → 64-bit frame length, server→client
   r = await tool("run_code", { code: longCode });
@@ -224,7 +213,7 @@ function rawPlugin(info, onCommand) {
     const pdf = JSON.parse(txt(r)).files[0];
     assert.equal(path.dirname(pdf.path), outDir, pdf.path);
     // only the connection a command went to may answer it; ids can't be guessed
-    const infoZ = { file: "Zeta", page: "P", editorType: "figma", version: "1.6.4", session: "sZ" };
+    const infoZ = { file: "Zeta", page: "P", editorType: "figma", version: "1.6.3", session: "sZ" };
     const Z = fakePlugin(infoZ, (m) => (m.command === "ping" ? ping(infoZ) : undefined));
     await Z.ready;
     const held = tool("get_tree", { node_id: "hold", file: "Product" });
@@ -271,18 +260,6 @@ function rawPlugin(info, onCommand) {
     r = await tool("get_tree", { node_id: "n1" });
     assert.ok(!/\[Note:/.test(txt(r)), "reported once");
     console.log("late changes reported OK");
-    // 1.6.4: a change Figma is still working on isn't timed out: Claude gets its real result
-    let t1 = Date.now();
-    r = await tool("run_code", { code: "beat:answer:1200", timeout_ms: 300 });
-    assert.ok(!r.isError && /finished after 1200/.test(txt(r)) && Date.now() - t1 >= 1100, txt(r));
-    t1 = Date.now();
-    r = await tool("run_code", { code: "beat:stop:300", timeout_ms: 300 });
-    assert.ok(r.isError && /Timed out after/.test(txt(r)) && /synchronous loop/.test(txt(r)) && Date.now() - t1 < 2000, (Date.now() - t1) + " " + txt(r));
-    t1 = Date.now();
-    r = await tool("run_code", { code: "beat:forever:0", timeout_ms: 300 });
-    assert.ok(r.isError && /Still running in Figma after/.test(txt(r)) && /smaller run_code/.test(txt(r)) && Date.now() - t1 >= 2400 && Date.now() - t1 < 4500, (Date.now() - t1) + " " + txt(r));
-    assert.ok(A.calls.filter((m) => m.command === "run_code").pop().until - Date.now() > -5000, "writes say how long the bridge may wait");
-    console.log("still-running changes wait for their result OK");
 
     // figma.com links and dash ids
     r = await tool("get_tree", { node_id: "https://www.figma.com/design/AbCdEf123456/Product?node-id=12-34&t=abc" });
@@ -308,7 +285,7 @@ function rawPlugin(info, onCommand) {
     console.log("ids, budget, paused, annotations OK (catalog " + catalog + " chars)");
 
     // a dropped socket gets a moment to come back; meanwhile changes without file don't go elsewhere
-    const infoR = { file: "Raw file", page: "P", editorType: "figma", version: "1.6.4", session: "sR" };
+    const infoR = { file: "Raw file", page: "P", editorType: "figma", version: "1.6.3", session: "sR" };
     let rawHeld = null;
     const onCmd = (m, send) => { if (m.command === "ping") send({ type: "result", id: m.id, ok: true, result: ping(infoR) }); else if (m.command) rawHeld = m; };
     const R1 = await rawPlugin(infoR, onCmd);
@@ -331,7 +308,7 @@ function rawPlugin(info, onCommand) {
   }
 
   /* a second file: the library */
-  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.6.4", session: "sB" };
+  const infoB = { file: "Savepet Library", page: "Tokens", editorType: "figma", version: "1.6.3", session: "sB" };
   let holdB = false;
   const B = fakePlugin(infoB, (m) => {
     if (m.command === "ping") return ping(infoB);

@@ -1,14 +1,5 @@
 # Changelog
 
-## 1.6.4
-
-The bridge's log from every Claude window since 1.6.3 (17,400 calls over two weeks) showed four kinds of failure:
-
-- **Changes that "timed out" but finished later.** 103 `run_code` calls timed out after 2–5 minutes, and the log shows most of them finished in Figma 3–11 minutes after they were sent. Claude saw only the timeout, then checked or ran the work again. Now the plugin says "still working" every 5 s while a change runs, and the bridge waits for the real result for up to 15 minutes. Only a plugin that stops answering for 20 s times out, which usually means a synchronous loop is blocking Figma. The one-change-at-a-time queue waits for it too, so the next change doesn't run alongside it.
-- **"Unable to establish connection to Figma"** (90 times, single calls between successful ones). Reads (`screenshot`, `get_tree`, `find_nodes`, …) are now tried again. Figma calls on layers (`exportAsync`, `getMainComponentAsync`, `loadAsync`, `set…StyleIdAsync`, …) are now watched and retried like the font and library calls.
-- **Slow code says what it is doing:** "waiting on node.getMainComponentAsync() for 40s" or "looping: 812 Figma calls so far". This shows in the panel, in `job` status and in the log.
-- **Hints for more API mistakes:** `figma.mixed` values ("cannot convert symbol"), "not a function", editing layers inside an instance, `FILL` outside auto layout, nested paint arrays (`[h.solid(…)]`), NaN colours, image URLs Figma won't fetch (use `place_image`), `loadFontAsync` with a string, and the dynamic-page `set…Async` setters.
-
 ## 1.6.3
 
 The log after 1.6.2 had no new bridge errors: what remained was code sent to Figma using its API wrongly, and a few `run_code` calls that ran for minutes.

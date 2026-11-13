@@ -7,7 +7,7 @@
    so Claude can tell what "this" and "here" mean. The log stays inside the
    plugin and is only sent when Claude asks for it (get_context). */
 
-const VERSION = "1.6.4";
+const VERSION = "1.6.3";
 const SESSION = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STARTED = Date.now();
 let mode = "allow";       // the panel's switch: "allow", "ask" (the user approves each change) or "off" (look only)
@@ -3239,22 +3239,14 @@ const HINTS = [
   [/color\.a/, "Gradient stop colours need { r, g, b, a } (a is required); a solid paint's color is { r, g, b } with opacity on the paint."],
   [/sublayer or table cell\) with id "I/, "Figma sometimes keeps layers inside instances that no longer exist, and findAll/findOne crash on them. Use h.findAll(root, n => …) (it skips them), and find layers again (find_nodes) instead of reusing old I…;… ids."],
   [/has not been explicitly loaded/i, "Load the page first: await page.loadAsync() (or await figma.loadAllPagesAsync() for the whole file)."],
-  [/documentAccess: dynamic-page/i, "Use the Async version: await figma.getNodeByIdAsync(id), await node.getMainComponentAsync(), await figma.getStyleByIdAsync(id), await node.setTextStyleIdAsync(id) (and the other set…StyleIdAsync), await node.setVectorNetworkAsync(v), and await page.loadAsync() before reading another page."],
+  [/documentAccess: dynamic-page/i, "Use the Async version: await figma.getNodeByIdAsync(id), await node.getMainComponentAsync(), await figma.getStyleByIdAsync(id), and await page.loadAsync() before reading another page."],
   [/Component set (for node )?has existing errors/i, "That component set has errors in Figma (often two variants with the same name, or a variant that isn't a component): fix it in Figma, or work on its components one by one instead of reading the set's properties."],
-  [/received array at index/i, "A paint list was nested ([[…]]): h.solid('#RRGGBB') already returns an array, so write n.fills = h.solid('#fff'), not [h.solid('#fff')]."],
-  [/received NaN at .*color/i, "A colour channel was NaN: colours are { r, g, b } from 0 to 1. Build them with h.color('#RRGGBB') or paints with h.solid('#RRGGBB')."],
   [/Property "(strokes|fills|effects)" failed validation|\[0\]\.type/i, "strokes, fills and effects take paint/effect objects in an array, not strings: n.strokes = h.solid('#RRGGBB') (or [{ type: 'SOLID', color: { r, g, b } }]); the thickness is the separate n.strokeWeight."],
   [/Property "layoutGrow" failed validation/i, "layoutGrow is 0 (keep size) or 1 (fill the free space), nothing in between; for a fixed share use layoutSizingHorizontal / layoutSizingVertical = 'FILL' | 'HUG' | 'FIXED'."],
   [/layoutPositioning = ABSOLUTE/i, "Absolute positioning only works inside an auto-layout frame: give the parent a layoutMode ('HORIZONTAL' | 'VERTICAL') first, or just set x/y on a child of a plain frame."],
   [/combineAsVariants\(\) must be provided|must be in the same page as the parent/i, "figma.combineAsVariants(components, parent) takes an array of components and a parent frame/page on the same page as them: figma.combineAsVariants(list, list[0].parent)."],
-  [/convert symbol to (string|number)|Cannot unwrap symbol/i, "A property was figma.mixed (a symbol: the text or layer has several values, e.g. two font sizes or fonts). Check value === figma.mixed before using it; for text use getRangeFontSize / getStyledTextSegments(['fontSize', 'fontName']), and h.loadFonts(node) to load mixed fonts."],
-  [/\bnot a function/i, "The code called something that isn't a method: a typo, a method this layer type doesn't have (findAll on a TEXT layer, children on a VECTOR), or an array helper on figma.mixed / a frozen paint list. Check node.type first; in dynamic-page use the Async versions (getNodeByIdAsync, getMainComponentAsync, getStyleByIdAsync)."],
-  [/cannot be overridden in an instance|inside of an instance|Cannot move node\. New parent is an instance|Removing this node is not allowed/i, "Layers inside an instance are locked to their main component: position, parent and existence can't change there. Change the main component (await inst.getMainComponentAsync()), use a component property / variant, or detach with inst.detachInstance() if the user wants that."],
-  [/can only be set on children of auto-layout frames/i, "FILL works only for a child of an auto-layout frame: give the parent layoutMode 'HORIZONTAL' | 'VERTICAL' first, or set a fixed width with resize()."],
-  [/does not satisfy the allowedDomains/i, "Figma only fetches images from allowed domains here: use the place_image tool with that url (the bridge downloads it), or figma.createImage(bytes) with bytes you already have."],
-  [/loadFontAsync.*Expected object, received string/i, "loadFontAsync takes { family, style }, e.g. await figma.loadFontAsync({ family: 'Inter', style: 'Regular' }); h.loadFonts(node) loads whatever a text layer uses."],
   [/\bis not defined/i, "The code uses a name that was never declared (a typo, or a variable from an earlier run_code: each run starts fresh). Declare it with const/let in this run."],
-  [/cannot (read|set) property ('[^']*' )?of (undefined|null)/i, "Something the code looked up wasn't there (a find returned null, or the layer is of another type): check it before using it."],
+  [/cannot read property '[^']+' of (undefined|null)/i, "Something the code looked up wasn't there (a find returned null, or the layer is of another type): check it before using it."],
   [/This node type can't be exported/i, "Export a frame, group or layer on the page, not the page or document itself."]
 ];
 function withHint(msg) {
@@ -3283,75 +3275,36 @@ function apiWhat(k, args) {
 function apiStuck() {
   let worst = null;
   API_PENDING.forEach(function (c) { if (!worst || c.at < worst.at) worst = c; });
-  return worst ? "waiting on " + worst.what + " for " + Math.round((Date.now() - worst.at) / 1000) + "s" : "";
+  return worst ? "waiting on figma." + worst.what + " for " + Math.round((Date.now() - worst.at) / 1000) + "s" : "";
 }
 function hangError(k, what, ms) {
   if (k === "loadFontAsync") return new Error("Figma didn't finish " + what + " within " + Math.round(ms / 1000) + " s. A font installed on this computer needs Figma's font helper: restart Figma, or use a font from await figma.listAvailableFontsAsync(). Nothing after this line of the code ran.");
   return new Error("Figma didn't finish " + what + " within " + Math.round(ms / 1000) + " s (its connection to the library may be stuck). Nothing after this line of the code ran; try again in a moment.");
 }
-let apiLast = "";
-/* obj: figma, figma.variables, … (methods called on it); proto: a node prototype (methods called on each node) */
-function patchFigma(obj, names, retry, prefix, proto) {
-  prefix = prefix === undefined ? "figma." : prefix;
+function patchFigma(obj, names, retry) {
   names.forEach(function (k) {
     try {
-      if (proto && !Object.prototype.hasOwnProperty.call(obj, k)) return;
       const orig = obj[k];
       if (typeof orig !== "function" || orig.__watched) return;
       const wrapped = function () {
-        const self = proto ? this : obj, args = arguments, id = ++apiSeq, k2 = apiWhat(k, args), what = prefix + k2;
-        apiLast = prefix + k;
+        const args = arguments, id = ++apiSeq, what = apiWhat(k, args);
         API_PENDING.set(id, { what: what, at: Date.now() });
-        const run = retry ? netRetry(orig, self, args) : Promise.resolve().then(function () { return orig.apply(self, args); });
+        const run = retry ? netRetry(orig, obj, args) : Promise.resolve().then(function () { return orig.apply(obj, args); });
         const ms = API_TIMEOUTS[k];
         let timer = null;
-        const guarded = ms ? Promise.race([run, new Promise(function (_, rej) { timer = setTimeout(function () { rej(hangError(k, k2, ms)); }, ms); })]) : run;
-        return guarded.then(function (v) { clearTimeout(timer); API_PENDING.delete(id); if (v && typeof v === "object" && v.type) watchNode(v); return v; }, function (e) { clearTimeout(timer); API_PENDING.delete(id); throw e; });
+        const guarded = ms ? Promise.race([run, new Promise(function (_, rej) { timer = setTimeout(function () { rej(hangError(k, what, ms)); }, ms); })]) : run;
+        return guarded.then(function (v) { clearTimeout(timer); API_PENDING.delete(id); return v; }, function (e) { clearTimeout(timer); API_PENDING.delete(id); throw e; });
       };
       wrapped.__watched = true;
       obj[k] = wrapped;
     } catch (e) { /* read-only: left as it is */ }
   });
 }
-/* Node methods (exportAsync, getMainComponentAsync, …) live on the node prototypes: watched the same way
-   (shown when a run waits on them, retried when Figma's connection hiccups) once a node of that kind is seen. */
-const NODE_ASYNC = ["exportAsync", "getMainComponentAsync", "loadAsync", "getCSSAsync", "setTextStyleIdAsync", "setFillStyleIdAsync", "setStrokeStyleIdAsync", "setEffectStyleIdAsync", "setGridStyleIdAsync", "setVectorNetworkAsync", "setReactionsAsync", "setRangeTextStyleIdAsync", "setRangeFillStyleIdAsync", "getInstancesAsync"];
-const PROTOS = new Set();
-function watchNode(n) {
-  try {
-    let p = Object.getPrototypeOf(n);
-    while (p && p !== Object.prototype && !PROTOS.has(p)) { PROTOS.add(p); patchFigma(p, NODE_ASYNC, true, "node.", true); p = Object.getPrototypeOf(p); }
-  } catch (e) { /* not patchable */ }
-}
-/* a few layers of the page, so the common kinds (frame, instance, text, …) are watched before code reaches them */
-let watchedAt = 0;
-function watchSome() {
-  if (Date.now() - watchedAt < 10000) return;
-  watchedAt = Date.now();
-  try {
-    watchNode(figma.root); watchNode(figma.currentPage);
-    const seen = {};
-    let queue = figma.currentPage.selection.slice(0, 20).concat(figma.currentPage.children.slice(0, 40)), n = 0;
-    while (queue.length && n < 300) {
-      const x = queue.shift(); n++;
-      let t = "";
-      try { t = x.type; } catch (e) { continue; }
-      if (!seen[t]) { seen[t] = 1; watchNode(x); }
-      let kids = null;
-      try { kids = x.children; } catch (e) { kids = null; }
-      if (kids && queue.length < 400) queue = queue.concat(kids.slice(0, 30));
-    }
-  } catch (e) { /* closing */ }
-}
 safe(function () { patchFigma(figma, ["loadFontAsync", "listAvailableFontsAsync", "importComponentByKeyAsync", "importComponentSetByKeyAsync", "importStyleByKeyAsync"], true); });
 safe(function () { patchFigma(figma.variables, ["importVariableByKeyAsync"], true); });
-/* reads are retried when Figma's connection hiccups (they are safe to repeat) */
-safe(function () { patchFigma(figma, ["loadAllPagesAsync", "getNodeByIdAsync", "getStyleByIdAsync", "getLocalPaintStylesAsync", "getLocalTextStylesAsync", "getLocalEffectStylesAsync", "getLocalGridStylesAsync"], true); });
-safe(function () { patchFigma(figma, ["saveVersionHistoryAsync", "setCurrentPageAsync", "createImageAsync", "createVideoAsync"], false); });
-safe(function () { patchFigma(figma.variables, ["getLocalVariablesAsync", "getLocalVariableCollectionsAsync", "getVariableByIdAsync", "getVariableCollectionByIdAsync"], true, "figma.variables."); });
-safe(function () { patchFigma(figma.variables, ["createVariableAliasByIdAsync"], false, "figma.variables."); });
-safe(function () { if (figma.teamLibrary) patchFigma(figma.teamLibrary, ["getAvailableLibraryVariableCollectionsAsync", "getVariablesInLibraryCollectionAsync", "getAvailableLibraryStyleCollectionsAsync"], true, "figma.teamLibrary."); });
-safe(watchSome);
+safe(function () { patchFigma(figma, ["loadAllPagesAsync", "saveVersionHistoryAsync", "setCurrentPageAsync", "getNodeByIdAsync", "getStyleByIdAsync", "createImageAsync", "createVideoAsync", "getLocalPaintStylesAsync", "getLocalTextStylesAsync", "getLocalEffectStylesAsync", "getLocalGridStylesAsync"], false); });
+safe(function () { patchFigma(figma.variables, ["getLocalVariablesAsync", "getLocalVariableCollectionsAsync", "getVariableByIdAsync", "getVariableCollectionByIdAsync", "createVariableAliasByIdAsync"], false); });
+safe(function () { if (figma.teamLibrary) patchFigma(figma.teamLibrary, ["getAvailableLibraryVariableCollectionsAsync", "getVariablesInLibraryCollectionAsync", "getAvailableLibraryStyleCollectionsAsync"], false); });
 
 /* ---------- the panel: approvals, progress, cancel, follow ---------- */
 const STOPPED = "Stopped part way through (cancelled): what it did before stopping stays in the file (one Cmd+Z undoes it).";
@@ -3449,18 +3402,16 @@ function notApproved(why) {
 /* a change running long says what it waits on (panel, job status) and, past 50 s, tells the log */
 const SLOW = new Map();
 function watchSlow(msg) {
-  const t0 = Date.now(), calls0 = apiSeq;
+  const t0 = Date.now();
   let told = false;
   SLOW.set(msg.id, setInterval(function () {
     const r = RUNNING.get(msg.id);
     if (!r) return;
     const sec = Math.round((Date.now() - t0) / 1000);
-    // every 5 s: "still working" (the bridge waits for the real result instead of timing out)
-    if (sec < 15 || r.total) { progressOut(msg.id, { state: "running" }); return; }
-    const stuck = apiStuck(), calls = apiSeq - calls0;
-    const what = stuck || (calls > 0 ? "looping: " + calls + " Figma calls so far, last " + apiLast + "()" : sec >= 30 ? "its own code is busy (a long loop?)" : "running its own code");
-    progressOut(msg.id, { state: "running", text: what });
-    if (sec >= 50 && !told) { told = true; reportProblem("slow " + msg.command, msg.command + " still running after " + sec + "s: " + (stuck || (calls > 0 ? what : "no Figma call pending (the code itself is busy: a loop over many layers, or waiting on something unwatched; h.progress(i, n) inside long loops lets Cancel work and shows where it is)"))); }
+    if (sec < 15) return;
+    const stuck = apiStuck();
+    if (!r.total) progressOut(msg.id, { state: "running", text: stuck || (sec >= 30 ? "its own code is busy (a long loop?)" : "running its own code") });
+    if (sec >= 50 && !told) { told = true; reportProblem("slow " + msg.command, msg.command + " still running after " + sec + "s: " + (stuck || "no Figma call pending (the code itself is busy: a loop over many layers, or waiting on a node method such as exportAsync / getMainComponentAsync / loadAsync; h.progress(i, n) inside long loops lets Cancel work and shows where it is)")); }
   }, 5000));
 }
 function cancelledText(by) { return "Cancelled before it ran" + (by === "claude" ? "" : " (by the user in Figma)") + ". Nothing was changed."; }
@@ -3659,8 +3610,7 @@ async function runCommand(msg, write) {
       busyStart(msg.id);   // not while it waited: what the user did meanwhile is theirs
       progressOut(msg.id, { state: "running" });
     }
-    watchSome();
-    result = write ? await fn(msg.params || {}) : await netRetry(fn, handlers, [msg.params || {}]);   // reads are safe to repeat
+    result = await fn(msg.params || {});
     if (write && msg.params && msg.params.look && result && typeof result === "object" && !Array.isArray(result)) {
       try { const pic = await lookAt(touchedIds(msg.command, msg.params, result)); if (pic) result.look = pic; else result.look_note = "Nothing on this page to show."; }
       catch (e) { result.look_note = "Couldn't take the picture: " + (e && e.message ? e.message : e); }
@@ -3695,13 +3645,7 @@ function guarded(msg) {
     const finish = function () { if (settled) return; settled = true; clearTimeout(timer); RELEASE.delete(msg.id); pendingWrites = Math.max(0, pendingWrites - 1); resolve(); };
     RELEASE.set(msg.id, finish);
     const until = msg.deadline ? msg.deadline + 2000 : Date.now() + ASK_MAX_MS + 60000;
-    const overdue = function () {
-      const r = RUNNING.get(msg.id);
-      // a newer bridge waits for a change that is still running (until msg.until): so does the queue
-      if (r && !r.cancel && msg.until && Date.now() < msg.until) { timer = setTimeout(overdue, 5000); return; }
-      progressOut(msg.id, { state: "overdue" }); busyEnd(msg.id); finish();
-    };
-    timer = setTimeout(overdue, Math.max(1000, until - Date.now()));
+    timer = setTimeout(function () { progressOut(msg.id, { state: "overdue" }); busyEnd(msg.id); finish(); }, Math.max(1000, until - Date.now()));
     runCommand(msg, true).then(finish, finish);
   });
 }
@@ -3755,4 +3699,4 @@ watchPage();
 loadPrefs();
 safe(cleanupTemp);
 setInterval(safely("viewport", pollViewport), 1500);
-globalThis.__claudeBridge = { version: VERSION, handlers: handlers, activity: ACT, describe: H.describe, timeouts: API_TIMEOUTS, watchNode: watchNode };
+globalThis.__claudeBridge = { version: VERSION, handlers: handlers, activity: ACT, describe: H.describe, timeouts: API_TIMEOUTS };

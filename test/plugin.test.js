@@ -364,10 +364,10 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
 (async () => {
   /* hello, ping, run_code, undo steps */
   await uiHandler({ type: "ui-ready" });
-  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.4"); assert.ok(toUI[0].info.session);
+  assert.equal(toUI[0].type, "hello"); assert.equal(toUI[0].info.file, "Take-home.fig"); assert.equal(toUI[0].info.version, "1.6.3"); assert.ok(toUI[0].info.session);
   console.log("hello OK (version + session)");
   let r = ok(await cmd("ping"));
-  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.4"); console.log("ping OK");
+  assert.equal(r.page, "Page 1"); assert.equal(r.version, "1.6.3"); console.log("ping OK");
 
   const commits0 = figma._commits;
   r = ok(await cmd("run_code", { code: "const f = figma.createFrame(); f.name = 'Card'; f.resize(358, 200); f.fills = h.solid('#15121F'); log('made', f.name); return f;" }));
@@ -1092,7 +1092,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     toUI.length = 0;
     emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("boom in handler"); } } }]);
     const pb = toUI.find((m) => m.type === "problem");
-    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.4", JSON.stringify(pb));
+    assert.ok(pb && pb.where === "nodechange" && /boom in handler/.test(pb.message) && pb.version === "1.6.3", JSON.stringify(pb));
     for (let i = 0; i < 8; i++) emitNodeChange([{ type: "PROPERTY_CHANGE", id: "1:1", origin: "LOCAL", properties: { get length() { throw new Error("again"); } } }]);
     assert.ok(toUI.filter((m) => m.type === "problem").length <= 5, "at most 5 a minute");
     console.log("problems reported OK");
@@ -1229,64 +1229,6 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
     }
     assert.equal(typeof figma.createImageAsync === "function" ? !!figma.createImageAsync.__watched : true, true, "more Figma async calls are watched");
     console.log("1.6.3: error hints OK");
-    // 1.6.4: a running change says "still working" every 5 s, and how many Figma calls it made
-    {
-      const nIv2 = intervals.length;
-      const runP = uiHandler({ type: "command", id: "hb1", command: "run_code", params: { code: "for (let i = 0; i < 3; i++) await figma.getNodeByIdAsync('0:1'); await new Promise((r) => { figma._release = r; }); return 'done'" } });
-      await new Promise((res) => setTimeout(res, 30));
-      toUI.length = 0;
-      intervals[nIv2]();
-      assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "hb1" && m.state === "running" && m.text === undefined), "heartbeat " + JSON.stringify(toUI));
-      tick(20000); intervals[nIv2]();
-      assert.ok(toUI.find((m) => m.type === "progress" && m.rid === "hb1" && /^looping: 3 Figma calls so far, last figma\.getNodeByIdAsync\(\)$/.test(m.text)), JSON.stringify(toUI.filter((m) => m.type === "progress")));
-      figma._release(); await runP;
-    }
-    // the queue waits for a change that is still running when the bridge said it would wait (msg.until)
-    {
-      const t = clock.t;
-      const w1 = uiHandler({ type: "command", id: "q1", command: "run_code", params: { code: "await new Promise((r) => { figma._release2 = r; }); return 1" }, deadline: t + 100, until: t + 600000 });
-      const w2 = uiHandler({ type: "command", id: "q2", command: "run_code", params: { code: "figma._w2 = true; return 2" }, deadline: t + 600000, until: t + 600000 });
-      await new Promise((res) => setTimeout(res, 2300));
-      assert.ok(!figma._w2, "the next change waits while the first is still running");
-      figma._release2(); await w1; await w2;
-      assert.ok(figma._w2, "and runs after it");
-      delete figma._w2;
-    }
-    // node methods are watched (and retried) once a node of that kind is seen
-    {
-      class FakeInst { constructor() { this.type = "INSTANCE"; this.n = 0; } async getMainComponentAsync() { this.n++; if (this.n === 1) throw new Error("Unable to establish connection to Figma after 10 seconds. Please check your internet connection."); return { type: "COMPONENT", name: "Main" }; } }
-      const fi = new FakeInst();
-      sandbox.__claudeBridge.watchNode(fi);
-      assert.ok(FakeInst.prototype.getMainComponentAsync.__watched, "prototype method watched");
-      assert.equal((await fi.getMainComponentAsync()).name, "Main"); assert.equal(fi.n, 2, "retried after a network hiccup");
-    }
-    // reads are tried again when Figma's connection hiccups
-    {
-      const HS = sandbox.__claudeBridge.handlers, orig = HS.get_selection;
-      let f = 0;
-      HS.get_selection = async function (p) { if (f++ === 0) throw new Error("Unable to establish connection to Figma after 10 seconds. Please check your internet connection."); return orig(p); };
-      ok(await cmd("get_selection", {}));
-      assert.equal(f, 2);
-      HS.get_selection = orig;
-    }
-    const hintCases2 = [
-      ["cannot convert symbol to number", /Hint: A property was figma\.mixed/],
-      ["in loadFontAsync: Cannot unwrap symbol", /Hint: A property was figma\.mixed/],
-      ["not a function", /Hint: The code called something that isn't a method/],
-      ["TypeError: n.findAll is not a function", /Hint: The code called something that isn't a method/],
-      ["in set_x: This property cannot be overridden in an instance: relative-transform", /Hint: Layers inside an instance/],
-      ["in insertChild: Cannot move node. New parent is an instance or is inside of an instance", /Hint: Layers inside an instance/],
-      ["in set_layoutSizingHorizontal: FILL can only be set on children of auto-layout frames", /Hint: FILL works only/],
-      ['in set_fills: Property "fills" failed validation: Expected object, received array at index 0', /Hint: A paint list was nested/],
-      ["in set_fills: Property \"fills\" failed validation: Expected number, received NaN at [0].color.b", /Hint: A colour channel/],
-      ["Image URL https://x.test/a.jpg does not satisfy the allowedDomains specified in the manifest", /Hint: .*place_image/],
-      ["in set_textStyleId: Cannot call with documentAccess: dynamic-page. Use node.setTextStyleIdAsync instead.", /setTextStyleIdAsync/]
-    ];
-    for (const [msg, re] of hintCases2) {
-      r = await cmd("run_code", { code: "throw new Error(" + JSON.stringify(msg) + ")" });
-      assert.ok(!r.ok && re.test(r.error), msg + " → " + r.error);
-    }
-    console.log("1.6.4: heartbeat, queue waits for a running change, node methods watched, read retry, hints OK");
     console.log("1.6.1 fixes (own h/log, compile hint, error hints, network retry, h.loadFonts, page screenshot, cancel release) OK");
   }
 
@@ -1409,7 +1351,7 @@ function emitNodeChange(changes) { current._ev.nodechange({ nodeChanges: changes
   assert.deepEqual(r.deleted, [cardId]);
   r = await cmd("nope", {});
   assert.ok(!r.ok && /Unknown command/.test(r.error));
-  assert.equal(sandbox.__claudeBridge.version, "1.6.4");
+  assert.equal(sandbox.__claudeBridge.version, "1.6.3");
   assert.deepEqual(errors, []);
   console.log("ALL PLUGIN TESTS PASSED (API rule violations: " + errors.length + ")");
 })().catch((e) => { console.error("FAILED", e); console.error("API rule violations:", errors); process.exit(1); });
